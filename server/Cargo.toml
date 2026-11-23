@@ -1,0 +1,21 @@
+[package]
+name = "medusa-app-server"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "medusa-app-server"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["ws"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+anyhow = "1"
+
+[profile.release]
+opt-level = 2
+strip = true

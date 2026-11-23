@@ -1,0 +1,31 @@
+# --- Node / Next.js ---
+node_modules/
+.next/
+out/
+dist/
+*.tsbuildinfo
+.env
+.env*.local
+
+# --- Rust ---
+server/target/
+**/*.rs.bk
+*.pdb
+
+# --- Runtime data (session logs, config with credentials) ---
+.medusa-home/
+.medusa-stdio-test/
+*.jsonl
+
+# --- Machine-local toolchain overrides (gitignored on purpose) ---
+server/.cargo/config.local.toml
+scripts/*.local.sh
+
+# --- Binaries & temp ---
+*.exe
+*.dll
+*.so
+*.dylib
+probe/
+*.log
+.DS_Store

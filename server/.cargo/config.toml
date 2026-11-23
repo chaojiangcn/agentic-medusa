@@ -1,0 +1,10 @@
+# Cargo configuration for the Medusa App Server.
+#
+# On a standard Rust toolchain (stable, any target) no extra flags are needed:
+#   cargo build --release
+#
+# Machine-specific linker workarounds (e.g. a `dlltool` shim for the
+# x86_64-pc-windows-gnu target without MinGW binutils) should NOT be committed.
+# Keep them in `.cargo/config.local.toml` (gitignored) or export RUSTFLAGS in
+# your shell, e.g.:
+#   RUSTFLAGS="-C dlltool=/path/to/shim.exe" cargo build
