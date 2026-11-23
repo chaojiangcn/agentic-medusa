@@ -87,6 +87,40 @@ export interface ItemInfo {
 }
 
 // ---------------------------------------------------------------------------
+// Tools — the host's capability ledger (office equipment)
+// ---------------------------------------------------------------------------
+
+/** Static definition: what the device is and which buttons it has. */
+export interface ToolSpec {
+  name: string
+  label: string
+  description: string
+  stageId: string
+  /** 'safe' | 'approval' — enforced in the protocol layer, not the browser. */
+  permission: 'safe' | 'approval' | string
+  inputSchema: Record<string, unknown>
+}
+
+/** Derived runtime view: the ledger plus usage counters from the log. */
+export interface ToolView {
+  name: string
+  label: string
+  description: string
+  stageId: string
+  permission: 'safe' | 'approval' | string
+  calls: number
+  lastSeq: number
+  active: boolean
+  lastReceipt: string
+}
+
+export interface ToolOutcome {
+  ok: boolean
+  receipt: string
+  durationMs: number
+}
+
+// ---------------------------------------------------------------------------
 // Workshop projection (derived from the log)
 // ---------------------------------------------------------------------------
 
@@ -158,6 +192,7 @@ export interface Snapshot {
   threads: ThreadInfo[]
   turns: TurnInfo[]
   items: ItemInfo[]
+  tools: ToolView[]
   lastEvent: SessionEvent | null
 }
 

@@ -198,6 +198,47 @@ impl SessionStore {
                     }
                 }
             }
+            "tool.call" => {
+                // A tool call is an Item even when it was fired manually
+                // (tools/call) with no enclosing turn: the ledger must show
+                // every capability the host exercised.
+                if let Some(item_id) = &ev.item_id {
+                    let name = ev
+                        .payload
+                        .get("toolName")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    self.items.insert(
+                        item_id.clone(),
+                        ItemInfo {
+                            id: item_id.clone(),
+                            turn_id: ev.turn_id.clone().unwrap_or_default(),
+                            kind: "toolCall".into(),
+                            status: "started".into(),
+                            worker_id: ev.worker_id.clone().unwrap_or_default(),
+                            stage: ev.stage.clone(),
+                            text: name,
+                            tokens: 0,
+                        },
+                    );
+                    if let Some(turn_id) = &ev.turn_id {
+                        if let Some(t) = self.turns.get_mut(turn_id) {
+                            t.items += 1;
+                        }
+                    }
+                }
+            }
+            "tool.result" => {
+                if let Some(item_id) = &ev.item_id {
+                    if let Some(item) = self.items.get_mut(item_id) {
+                        if let Some(receipt) = ev.payload.get("receipt").and_then(Value::as_str) {
+                            item.text = receipt.into();
+                        }
+                        item.status = "completed".into();
+                    }
+                }
+            }
             _ => {}
         }
     }

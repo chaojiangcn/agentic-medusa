@@ -217,6 +217,8 @@ export function eventLabel(kind: string): string {
     'boss.intervention': '老板介入 / 审批',
     'system.control': '人工介入',
     'config.updated': '配置更新',
+    'tool.call': '设备启动',
+    'tool.result': '结果小票',
     'external.event': '外部上报',
     'session.event': '会话事件',
   }
@@ -227,6 +229,9 @@ export function eventDetail(event: SessionEvent): string {
   const p = event.payload ?? {}
   const note = typeof p.note === 'string' ? p.note : ''
   const delta = typeof p.delta === 'string' ? p.delta : ''
-  const parts = [note, delta].filter(Boolean)
+  const label = typeof p.label === 'string' ? p.label : ''
+  const receipt = typeof p.receipt === 'string' ? p.receipt : ''
+  const blocked = p.blocked === true ? '闸口拦下' : ''
+  const parts = [label, note, delta, blocked, receipt].filter(Boolean)
   return parts.join(' · ').slice(0, 90)
 }

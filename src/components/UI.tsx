@@ -31,8 +31,9 @@ export function UI() {
     frames, cursor, playing, speed, connected, error, selectedWorkerId,
     approval, config, threads, activeThread, protocolVersion, configHome,
   } = store
-  const [tab, setTab] = useState<'workers' | 'config' | 'protocol'>('workers')
+  const [tab, setTab] = useState<'workers' | 'tools' | 'config' | 'protocol'>('workers')
   const [busy, setBusy] = useState(false)
+  const [toolResult, setToolResult] = useState<{ blocked: boolean; text: string } | null>(null)
 
   const maxCursor = Math.max(0, frames.length - 1)
   const recent = frames
@@ -43,6 +44,8 @@ export function UI() {
     .reverse()
 
   const workers = snapshot?.workers ?? []
+  const tools = snapshot?.tools ?? []
+  const toolCalls = tools.reduce((sum, tool) => sum + tool.calls, 0)
   const selected = workers.find((worker) => worker.id === selectedWorkerId) ?? workers[0]
   const stageIndex = snapshot?.stages.findIndex((stage) => stage.id === selected?.stageId) ?? -1
   const nextStage = snapshot?.stages[(stageIndex + 1) % (snapshot?.stages.length || 1)]
@@ -53,6 +56,21 @@ export function UI() {
       await store.call(method, params)
     } catch (e) {
       store.sendControl({ action: 'resume' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const callTool = async (name: string) => {
+    setBusy(true)
+    try {
+      const res = await store.call<{ blocked: boolean; receipt: string }>('tools/call', { name })
+      setToolResult({
+        blocked: Boolean(res.blocked),
+        text: (res.blocked ? '闸口拦下' : '结果小票') + ' · ' + res.receipt,
+      })
+    } catch (e) {
+      setToolResult({ blocked: true, text: e instanceof Error ? e.message : '设备调用失败' })
     } finally {
       setBusy(false)
     }
@@ -79,6 +97,7 @@ export function UI() {
       <aside className="panel left">
         <div className="tabs">
           <button className={tab === 'workers' ? 'active' : ''} onClick={() => setTab('workers')}>车间</button>
+          <button className={tab === 'tools' ? 'active' : ''} onClick={() => setTab('tools')}>设备</button>
           <button className={tab === 'config' ? 'active' : ''} onClick={() => setTab('config')}>配置</button>
           <button className={tab === 'protocol' ? 'active' : ''} onClick={() => setTab('protocol')}>协议</button>
         </div>
@@ -143,6 +162,35 @@ export function UI() {
               ))}
             </section>
           </>
+        )}
+
+        {tab === 'tools' && (
+          <section>
+            <h3>设备台账 · {tools.length}</h3>
+            <p className="note">
+              设备由 App Server 注册，浏览器只拿到清单和结果小票，不执行任何东西。
+              标「需签字」的设备在协议层就被拦下。
+            </p>
+            {tools.length === 0 && <p className="empty">连接后读取设备清单…</p>}
+            {tools.map((tool) => (
+              <div className="tool-row" key={tool.name}>
+                <div className="tool-row-head">
+                  <b>{tool.label}</b>
+                  <span className={'perm-badge ' + tool.permission}>
+                    {tool.permission === 'approval' ? '需签字' : '可直接用'}
+                  </span>
+                </div>
+                <small>{tool.name} · {tool.stageId} · {tool.description}</small>
+                <small>调用 {tool.calls} 次 · {tool.lastReceipt || '尚无小票'}</small>
+                <div className="btn-row" style={{ marginTop: 7, marginBottom: 0 }}>
+                  <button disabled={busy} onClick={() => callTool(tool.name)}>启动设备</button>
+                </div>
+              </div>
+            ))}
+            {toolResult && (
+              <p className={toolResult.blocked ? 'error' : 'note'}>{toolResult.text}</p>
+            )}
+          </section>
         )}
 
         {tab === 'config' && (
@@ -212,6 +260,8 @@ export function UI() {
             <div className="metric"><span>阻塞</span><b>{snapshot?.metrics.blocked ?? 0}</b></div>
             <div className="metric"><span>已完成</span><b>{snapshot?.metrics.completed ?? 0}</b></div>
             <div className="metric"><span>LLM 调用</span><b>{snapshot?.metrics.llmCalls ?? 0}</b></div>
+            <div className="metric"><span>设备</span><b>{tools.length}</b></div>
+            <div className="metric"><span>设备调用</span><b>{toolCalls}</b></div>
           </div>
         </section>
 

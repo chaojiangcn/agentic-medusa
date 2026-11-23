@@ -223,6 +223,46 @@ pub struct ItemInfo {
 }
 
 // ---------------------------------------------------------------------------
+// Tools — the host's capability ledger (the office's equipment).
+// ---------------------------------------------------------------------------
+
+/// Static definition: what the device is and which buttons it has.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolSpec {
+    pub name: String,
+    pub label: String,
+    pub description: String,
+    pub stage_id: String,
+    /// "safe" | "approval" — the capability seam, enforced in the protocol layer.
+    pub permission: String,
+    pub input_schema: Value,
+}
+
+/// Derived runtime view: the ledger plus usage counters from the log.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolView {
+    pub name: String,
+    pub label: String,
+    pub description: String,
+    pub stage_id: String,
+    pub permission: String,
+    pub calls: u32,
+    pub last_seq: u64,
+    pub active: bool,
+    pub last_receipt: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolOutcome {
+    pub ok: bool,
+    pub receipt: String,
+    pub duration_ms: u64,
+}
+
+// ---------------------------------------------------------------------------
 // Workshop projection — derived from the log, never stored as truth.
 // ---------------------------------------------------------------------------
 
@@ -310,6 +350,8 @@ pub struct Snapshot {
     pub threads: Vec<ThreadInfo>,
     pub turns: Vec<TurnInfo>,
     pub items: Vec<ItemInfo>,
+    /// Equipment ledger, projected from tool.call / tool.result facts.
+    pub tools: Vec<ToolView>,
     /// Most recent session event, for the event-stream panel.
     pub last_event: Option<SessionEvent>,
 }

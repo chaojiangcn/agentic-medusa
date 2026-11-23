@@ -5,7 +5,7 @@ import { Html, OrbitControls } from '@react-three/drei'
 import * as THREE from 'three'
 import { useRef } from 'react'
 import { selectSnapshot, useMedusaStore } from '@/lib/store'
-import type { Boss, Stage, Worker, WorkTask } from '@/lib/contract'
+import type { Boss, Stage, ToolView, Worker, WorkTask } from '@/lib/contract'
 
 const STATUS_COLOR: Record<string, string> = {
   busy: '#534ab7',
@@ -148,6 +148,36 @@ function Conveyor() {
   )
 }
 
+function ToolDevice({ tool, x, recent }: { tool: ToolView; x: number; recent: boolean }) {
+  const color = recent ? '#1d9e75' : tool.permission === 'approval' ? '#ba7517' : '#9aa3b2'
+  return (
+    <group position={[x, 0.38, 0.95]}>
+      <mesh castShadow>
+        <boxGeometry args={[0.5, 0.44, 0.38]} />
+        <meshStandardMaterial color={color} roughness={0.45} />
+      </mesh>
+      <mesh position={[0, 0.06, 0.195]}>
+        <boxGeometry args={[0.36, 0.2, 0.02]} />
+        <meshStandardMaterial color={recent ? '#d7f5e8' : '#e9edf3'} />
+      </mesh>
+      <mesh position={[0, 0.28, 0]}>
+        <cylinderGeometry args={[0.025, 0.025, 0.14, 8]} />
+        <meshStandardMaterial color={recent ? '#0f6e56' : '#6b7280'} />
+      </mesh>
+      {recent && tool.lastReceipt && (
+        <Html center distanceFactor={16} position={[0, 0.78, 0]}>
+          <div className="tool-receipt">
+            {tool.lastReceipt.length > 14 ? tool.lastReceipt.slice(0, 13) + '…' : tool.lastReceipt}
+          </div>
+        </Html>
+      )}
+      <Html center distanceFactor={18} position={[0, -0.34, 0]}>
+        <div className={'tool-tag' + (recent ? ' active' : '')}>{tool.label}</div>
+      </Html>
+    </group>
+  )
+}
+
 function Scene() {
   const snapshot = useMedusaStore(selectSnapshot)
   const selectedWorkerId = useMedusaStore((state) => state.selectedWorkerId)
@@ -171,6 +201,21 @@ function Scene() {
           highlighted={snapshot.boss.targetStageId === stage.id && snapshot.boss.mode !== 'patrol'}
         />
       ))}
+      {snapshot.stages.map((stage) => {
+        const devices = (snapshot.tools ?? []).filter((tool) => tool.stageId === stage.id)
+        return (
+          <group key={'devices-' + stage.id} position={[stage.position.x, stage.position.y, stage.position.z]}>
+            {devices.map((tool, i) => (
+              <ToolDevice
+                key={tool.name}
+                tool={tool}
+                x={(i - (devices.length - 1) / 2) * 1.05}
+                recent={tool.active || (tool.lastSeq > 0 && snapshot.seq - tool.lastSeq < 12)}
+              />
+            ))}
+          </group>
+        )
+      })}
       {snapshot.workers.map((worker) => (
         <WorkerFigure
           key={worker.id}

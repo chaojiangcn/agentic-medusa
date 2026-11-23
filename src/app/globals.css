@@ -264,3 +264,29 @@ button { cursor: pointer; }
 .approval-card .btn-row button { padding: 9px 12px; font-size: 12px; }
 .approval-card .btn-row button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
 .approval-card .btn-row button.danger { background: #fff; color: var(--bad); border-color: #e8b4b4; }
+
+.tool-tag {
+  font-size: 10px; padding: 2px 6px; border-radius: 5px;
+  border: 1px solid #c9cfda; background: #fff; color: #5f5e5a;
+  white-space: nowrap; pointer-events: none;
+}
+.tool-tag.active { border-color: #1d9e75; color: #0f6e56; background: #e1f5ee; }
+.tool-receipt {
+  font-size: 10px; line-height: 1.4;
+  padding: 3px 7px; border-radius: 6px;
+  border: 1px solid #1d9e75; background: #e1f5ee; color: #085041;
+  white-space: nowrap; text-align: center; pointer-events: none;
+}
+.tool-row {
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 9px 10px; margin-bottom: 7px; background: var(--surface-solid);
+}
+.tool-row-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.tool-row-head b { font-size: 12px; font-weight: 500; }
+.tool-row small { display: block; font-size: 10px; color: var(--text-2); line-height: 1.5; margin-top: 3px; }
+.perm-badge {
+  font-size: 9px; padding: 2px 6px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--text-3); white-space: nowrap;
+}
+.perm-badge.safe { color: var(--ok); border-color: #9fe1cb; background: #e1f5ee; }
+.perm-badge.approval { color: #854f0b; border-color: #fac775; background: #faeeda; }

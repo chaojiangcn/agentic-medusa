@@ -12,6 +12,7 @@ use crate::config::ConfigStore;
 use crate::protocol::*;
 use crate::session::SessionStore;
 use crate::workshop::{emit, initial_snapshot, project};
+use crate::tools::{sample_args, ToolRegistry};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -102,6 +103,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/threads", get(threads_handler))
         .route("/api/config", get(config_read))
         .route("/api/config", post(config_write))
+        .route("/api/tools", get(tools_read))
         .route("/api/events", post(ingest))
         .route("/api/control", post(control))
         .route("/api/stream", get(sse))
@@ -158,12 +160,13 @@ async fn protocol_info() -> impl IntoResponse {
             "initialize", "thread/start", "thread/list", "thread/resume",
             "thread/fork", "thread/read", "turn/start", "turn/interrupt",
             "control", "config/read", "config/write", "event/ingest",
-            "session/replay", "approval/respond"
+            "session/replay", "approval/respond", "tools/list", "tools/call"
         ],
         "notifications": [
             "thread/started", "turn/started", "turn/completed", "turn/interrupted",
             "item/started", "item/agentMessage/delta", "item/completed",
             "boss/patrol", "boss/inspection", "boss/intervention",
+            "tool/call", "tool/result",
             "workshop/snapshot", "system/control", "config/updated", "session/event"
         ],
         "serverRequests": ["approval/request"],
@@ -218,6 +221,14 @@ async fn threads_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
         "activeThread": state.active_thread.lock().await.clone(),
         "threads": state.store.lock().await.threads(),
     }))
+}
+
+/// REST view of the equipment ledger (a convenience shim over tools/list).
+async fn tools_read(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match dispatch(&state, "tools/list", json!({})).await {
+        Ok(value) => Json(value),
+        Err((_, message)) => Json(json!({ "error": message })),
+    }
 }
 
 async fn config_read(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -563,7 +574,9 @@ async fn dispatch(
                     "replay": true,
                     "fork": true,
                     "stdio": true,
-                    "websocket": true
+                    "websocket": true,
+                    "tools": true,
+                    "toolCall": true
                 },
                 "configHome": state.config.home.display().to_string(),
                 "config": state.config.view(),
@@ -737,6 +750,124 @@ async fn dispatch(
             .await
             .map_err(|e| (ERR_INVALID_PARAMS, e.to_string()))?;
             Ok(json!({ "ok": true, "seq": frame.event.seq }))
+        }
+
+        "tools/list" => {
+            let registry = ToolRegistry::builtin();
+            let views = state.snapshot.lock().await.tools.clone();
+            Ok(json!({
+                "tools": registry.list(),
+                "views": views,
+                "modelTools": registry.as_model_tools(),
+                "policy": { "approvalRequired": "shell.exec", "enforcedAt": "protocol" }
+            }))
+        }
+        "tools/call" => {
+            let name = s("name");
+            let registry = ToolRegistry::builtin();
+            let tool = match registry.get(&name).cloned() {
+                Some(t) => t,
+                None => return Err((ERR_INVALID_PARAMS, format!("unknown tool: {name}"))),
+            };
+            let thread = state.active_thread.lock().await.clone();
+            let turn_id = state
+                .store
+                .lock()
+                .await
+                .turns()
+                .iter()
+                .rev()
+                .find(|t| t.status == "running")
+                .map(|t| t.id.clone())
+                .unwrap_or_default();
+            let task_id = s("taskId");
+            let worker_id = if s("workerId").is_empty() {
+                tool.stage_id.clone()
+            } else {
+                s("workerId")
+            };
+            let args = params
+                .get("args")
+                .cloned()
+                .unwrap_or_else(|| sample_args(&name, "manual"));
+            let item_id = format!("tool-{}", crate::session::short_id());
+
+            let mut call = SessionEvent::new(
+                0,
+                &thread,
+                "tool.call",
+                &worker_id,
+                json!({
+                    "toolName": name.clone(), "label": tool.label.clone(),
+                    "args": args.clone(), "permission": tool.permission,
+                    "stageId": tool.stage_id, "kind": "toolCall",
+                    "source": "tools/call"
+                }),
+            )
+            .with_item(&item_id)
+            .with_worker(&worker_id)
+            .with_stage(&tool.stage_id);
+            if !task_id.is_empty() {
+                call = call.with_task(&task_id);
+            }
+            if !turn_id.is_empty() {
+                call = call.with_turn(&turn_id);
+            }
+            let call_frame = emit(state, call)
+                .await
+                .map_err(|e| (ERR_INVALID_PARAMS, e.to_string()))?;
+
+            // The capability seam lives here, not in the browser: an
+            // approval-gated device is refused by the protocol layer itself.
+            let (outcome, blocked) = if tool.permission == "approval" {
+                (
+                    ToolOutcome {
+                        ok: false,
+                        receipt: "需老板签字，设备未启动".into(),
+                        duration_ms: 0,
+                    },
+                    true,
+                )
+            } else {
+                (registry.execute(&name, &args), false)
+            };
+            let ok = outcome.ok;
+            let receipt = outcome.receipt;
+            let duration = outcome.duration_ms;
+
+            let mut result = SessionEvent::new(
+                0,
+                &thread,
+                "tool.result",
+                &worker_id,
+                json!({
+                    "toolName": name.clone(), "label": tool.label.clone(),
+                    "ok": ok, "receipt": receipt.clone(), "durationMs": duration,
+                    "blocked": blocked
+                }),
+            )
+            .with_item(&item_id)
+            .with_worker(&worker_id)
+            .with_stage(&tool.stage_id);
+            if !task_id.is_empty() {
+                result = result.with_task(&task_id);
+            }
+            if !turn_id.is_empty() {
+                result = result.with_turn(&turn_id);
+            }
+            let result_frame = emit(state, result)
+                .await
+                .map_err(|e| (ERR_INVALID_PARAMS, e.to_string()))?;
+
+            Ok(json!({
+                "ok": ok,
+                "blocked": blocked,
+                "reason": if blocked { "approval" } else { "" },
+                "toolName": name,
+                "receipt": receipt,
+                "callSeq": call_frame.event.seq,
+                "resultSeq": result_frame.event.seq
+            }))
         }
 
         "config/read" => Ok(serde_json::to_value(state.config.view()).unwrap()),

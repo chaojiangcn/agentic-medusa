@@ -14,6 +14,7 @@ mod llm;
 mod protocol;
 mod rpc;
 mod session;
+mod tools;
 mod workshop;
 
 use anyhow::Result;

@@ -7,6 +7,7 @@ use crate::config::ConfigStore;
 use crate::llm::{complete_blocking, mock_text, LlmClient};
 use crate::protocol::*;
 use crate::rpc::{AppState, ApprovalReply};
+use crate::tools::{sample_args, ToolRegistry};
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -71,6 +72,18 @@ pub fn initial_snapshot(thread_id: &str) -> Snapshot {
         threads: Vec::new(),
         turns: Vec::new(),
         items: Vec::new(),
+        tools: ToolRegistry::builtin()
+            .list()
+            .into_iter()
+            .map(|t| ToolView {
+                name: t.name,
+                label: t.label,
+                description: t.description,
+                stage_id: t.stage_id,
+                permission: t.permission,
+                ..Default::default()
+            })
+            .collect(),
         last_event: None,
         ..Default::default()
     }
@@ -202,6 +215,26 @@ pub fn project(snap: &mut Snapshot, ev: &SessionEvent) {
             apply_control(snap, p);
         }
         "system.control" => apply_control(snap, p),
+        "tool.call" => {
+            let name = s("toolName");
+            for t in &mut snap.tools {
+                t.active = false;
+            }
+            if let Some(t) = snap.tools.iter_mut().find(|t| t.name == name) {
+                t.calls += 1;
+                t.active = true;
+                t.last_seq = ev.seq;
+                t.last_receipt = format!("{} 启动中…", t.label);
+            }
+        }
+        "tool.result" => {
+            let name = s("toolName");
+            if let Some(t) = snap.tools.iter_mut().find(|t| t.name == name) {
+                t.active = false;
+                t.last_seq = ev.seq;
+                t.last_receipt = s("receipt");
+            }
+        }
         "config.updated" => {
             let model = s("model");
             for w in &mut snap.workers {
@@ -467,6 +500,8 @@ fn ui_method(kind: &str) -> &'static str {
         "boss.intervention" => "boss/intervention",
         "system.control" => "system/control",
         "config.updated" => "config/updated",
+        "tool.call" => "tool/call",
+        "tool.result" => "tool/result",
         _ => "session/event",
     }
 }
@@ -652,6 +687,66 @@ async fn stream_item(
     }
     if let Err(e) = emit(state, done).await {
         eprintln!("item.completed failed: {e}");
+    }
+
+    // One step = one model request plus the tool calls that follow it. In
+    // mock mode the driver picks a safe device at this station, writes
+    // tool.call, executes locally, then writes tool.result. Both are facts
+    // in the append-only log, so replay shows the same receipts.
+    let registry = ToolRegistry::builtin();
+    let candidates = registry.safe_for_stage(stage);
+    if !candidates.is_empty() && (seed + worker_id.len() as u64) % 3 != 0 {
+        let tool = candidates[(seed as usize) % candidates.len()];
+        let name = tool.name.clone();
+        let label = tool.label.clone();
+        let args = sample_args(&name, task_id);
+        let tool_item_id = format!("tool-{}-{}", task_id, crate::session::short_id());
+        let mut call = SessionEvent::new(
+            0,
+            thread_id,
+            "tool.call",
+            worker_id,
+            json!({
+                "toolName": name.clone(), "label": label.clone(), "args": args.clone(),
+                "permission": tool.permission, "stageId": stage,
+                "kind": "toolCall"
+            }),
+        )
+        .with_item(&tool_item_id)
+        .with_task(task_id)
+        .with_worker(worker_id)
+        .with_stage(stage);
+        if !turn_id.is_empty() {
+            call = call.with_turn(turn_id);
+        }
+        if let Err(e) = emit(state, call).await {
+            eprintln!("tool.call failed: {e}");
+        }
+
+        // Give the projector a visible "device running" beat before the receipt.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+
+        let outcome = registry.execute(&name, &args);
+        let mut result = SessionEvent::new(
+            0,
+            thread_id,
+            "tool.result",
+            worker_id,
+            json!({
+                "toolName": name.clone(), "label": label.clone(), "ok": outcome.ok,
+                "receipt": outcome.receipt, "durationMs": outcome.duration_ms
+            }),
+        )
+        .with_item(&tool_item_id)
+        .with_task(task_id)
+        .with_worker(worker_id)
+        .with_stage(stage);
+        if !turn_id.is_empty() {
+            result = result.with_turn(turn_id);
+        }
+        if let Err(e) = emit(state, result).await {
+            eprintln!("tool.result failed: {e}");
+        }
     }
 }
 
