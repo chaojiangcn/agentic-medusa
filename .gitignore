@@ -28,4 +28,6 @@ scripts/*.local.sh
 *.dylib
 probe/
 *.log
+.playwright-cli/
+medusa-*.png
 .DS_Store

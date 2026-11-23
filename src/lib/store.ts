@@ -10,11 +10,37 @@ import type {
   ControlCommand,
   Frame,
   RpcMessage,
+  Snapshot,
   ThreadInfo,
 } from './contract'
 import { approvalParams, RpcClient } from './rpc'
 
-const MAX_FRAMES = 3000
+const MAX_FRAMES = 600
+
+/**
+ * REST base for the App Server. Replay over a long append-only log is heavy
+ * (one full projection per event), so the first paint comes from a single
+ * snapshot fetch and live frames are polled as a safety net next to the
+ * JSON-RPC notification stream.
+ */
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://127.0.0.1:8787'
+
+let pollTimer: ReturnType<typeof setInterval> | null = null
+
+function snapshotFrame(snap: Snapshot): Frame {
+  return {
+    event: {
+      seq: snap.seq,
+      ts: Date.now(),
+      threadId: snap.threadId,
+      kind: 'workshop/snapshot',
+      actor: 'server',
+      stage: '',
+      payload: { source: 'snapshot-poll' },
+    },
+    snapshot: snap,
+  }
+}
 
 let client: RpcClient | null = null
 
@@ -63,6 +89,36 @@ export const useMedusaStore = create<MedusaState>((set, get) => ({
 
   connect: () => {
     if (client) return
+
+    // First paint: one snapshot is enough to mount the whole 3D workshop,
+    // even before (or without) a full append-only replay.
+    const applySnapshot = (snap: Snapshot) => {
+      if (!snap || typeof snap.seq !== 'number') return
+      set((state) => {
+        const last = state.frames[state.frames.length - 1]
+        if (last && snap.seq <= (last.snapshot?.seq ?? -1)) return state
+        const frames = [...state.frames, snapshotFrame(snap)]
+        if (frames.length > MAX_FRAMES) frames.splice(0, frames.length - MAX_FRAMES)
+        return {
+          frames,
+          cursor: state.playing ? frames.length - 1 : Math.min(state.cursor, frames.length - 1),
+          speed: snap.speed ?? state.speed,
+        }
+      })
+    }
+
+    // Live fallback: keeps the workshop moving when notifications are lost
+    // or the replay request is still in flight.
+    const pollOnce = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/snapshot`, { cache: 'no-store' })
+        if (!res.ok) return
+        applySnapshot((await res.json()) as Snapshot)
+      } catch {
+        /* App Server 尚未就绪时静默重试 */
+      }
+    }
+
     client = new RpcClient(undefined, {
       onFrame: (frame) =>
         set((state) => {
@@ -117,6 +173,12 @@ export const useMedusaStore = create<MedusaState>((set, get) => ({
             if (Array.isArray(res?.threads)) set({ threads: res.threads! })
           })
           .catch(() => undefined)
+
+        // Paint immediately, then keep a slow poll as the safety net.
+        void pollOnce()
+        if (!pollTimer) {
+          pollTimer = setInterval(() => void pollOnce(), 1000)
+        }
       },
     })
     client.connect()

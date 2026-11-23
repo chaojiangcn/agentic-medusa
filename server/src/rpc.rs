@@ -173,6 +173,11 @@ async fn protocol_info() -> impl IntoResponse {
 
 /// Replay: rebuild frames by projecting the log from the beginning. This is
 /// the "state is a projection" guarantee — no separate stored truth.
+/// Replay budget. Every frame embeds a full projection, so replaying a long
+/// append-only log frame-by-frame turns into hundreds of MB over the wire.
+/// The UI only keeps a sliding window, so the server sends the tail only.
+const MAX_REPLAY_FRAMES: usize = 240;
+
 pub async fn build_frames(state: &Arc<AppState>, thread_id: &str, after_seq: u64) -> Vec<Frame> {
     let events = {
         let store = state.store.lock().await;
@@ -180,13 +185,16 @@ pub async fn build_frames(state: &Arc<AppState>, thread_id: &str, after_seq: u64
     };
     let mut snap = initial_snapshot(thread_id);
     snap.threads = state.store.lock().await.threads();
-    let mut frames = Vec::with_capacity(events.len());
-    for ev in events {
-        project(&mut snap, &ev);
-        frames.push(Frame {
-            event: ev,
-            snapshot: snap.clone(),
-        });
+    let start = events.len().saturating_sub(MAX_REPLAY_FRAMES);
+    let mut frames = Vec::with_capacity(events.len() - start);
+    for (index, ev) in events.iter().enumerate() {
+        project(&mut snap, ev);
+        if index >= start {
+            frames.push(Frame {
+                event: ev.clone(),
+                snapshot: snap.clone(),
+            });
+        }
     }
     frames
 }
@@ -423,10 +431,19 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 Some(text) = out_rx.recv() => {
                     if sink.send(Message::Text(text.into())).await.is_err() { break; }
                 }
-                Ok(text) = sub.recv() => {
-                    if sink.send(Message::Text(text.into())).await.is_err() { break; }
+                received = sub.recv() => {
+                    match received {
+                        Ok(text) => {
+                            if sink.send(Message::Text(text.into())).await.is_err() { break; }
+                        }
+                        // A slow client must not kill its outbound channel:
+                        // skip the backlog and keep streaming live frames.
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            eprintln!("ws subscriber lagged, skipped {skipped} messages");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
                 }
-                else => break,
             }
         }
     });

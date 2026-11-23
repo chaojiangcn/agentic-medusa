@@ -89,13 +89,24 @@ pub fn project(snap: &mut Snapshot, ev: &SessionEvent) {
     match ev.kind.as_str() {
         "turn.started" => {
             let id = s("taskId");
-            snap.tasks.push(WorkTask {
-                id: id.clone(),
-                title: s("title"),
-                stage_index: 0,
-                progress: 0.0,
-                status: "running".into(),
-            });
+            let title = s("title");
+            // A resumed or forked log can replay `turn.started` for a task
+            // that is already on the shop floor; update it in place instead
+            // of pushing a duplicate (React keys + 3D instances would double).
+            if let Some(task) = snap.tasks.iter_mut().find(|task| task.id == id) {
+                task.title = title;
+                task.stage_index = 0;
+                task.progress = 0.0;
+                task.status = "running".into();
+            } else {
+                snap.tasks.push(WorkTask {
+                    id: id.clone(),
+                    title,
+                    stage_index: 0,
+                    progress: 0.0,
+                    status: "running".into(),
+                });
+            }
         }
         "item.started" => {
             let wid = ev.worker_id.clone().unwrap_or_default();

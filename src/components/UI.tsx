@@ -35,7 +35,12 @@ export function UI() {
   const [busy, setBusy] = useState(false)
 
   const maxCursor = Math.max(0, frames.length - 1)
-  const recent = frames.slice(Math.max(0, cursor - 7), cursor + 1).reverse()
+  const recent = frames
+    .slice(0, cursor + 1)
+    // Polling frames are a transport artifact, not workshop activity.
+    .filter((frame) => frame.event.payload?.source !== 'snapshot-poll')
+    .slice(-8)
+    .reverse()
 
   const workers = snapshot?.workers ?? []
   const selected = workers.find((worker) => worker.id === selectedWorkerId) ?? workers[0]
@@ -66,7 +71,7 @@ export function UI() {
           </span>
           <span className="chip">v{protocolVersion}</span>
           <span className="chip">{activeThread}</span>
-          <span className="chip">帧 {cursor} / {maxCursor}</span>
+          <span className="chip">帧 {frames.length ? cursor + 1 : 0} / {frames.length}</span>
           <span className="chip accent">老板 · {snapshot?.boss.mode ?? '—'}</span>
         </div>
       </header>
@@ -235,7 +240,7 @@ export function UI() {
           <button onClick={() => store.setPlaying(true)}>跳到最新</button>
           <span className="spacer" />
           <span className="readout">
-            seq {frames[cursor]?.event.seq ?? 0} · tick {snapshot?.tick ?? 0} · {playing ? '跟随实时流' : '回放中'}
+            seq {frames[cursor]?.event.seq || '—'} · 速率 ×{speed} · {playing ? '跟随实时流' : '回放中'}
           </span>
         </div>
         <input
