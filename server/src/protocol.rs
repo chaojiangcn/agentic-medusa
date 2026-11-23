@@ -263,6 +263,66 @@ pub struct ToolOutcome {
 }
 
 // ---------------------------------------------------------------------------
+// Dispatch — who decided this work order goes to which station.
+// ---------------------------------------------------------------------------
+
+/// A logged assignment. The dispatcher's reasoning is part of the record, not
+/// a UI afterthought: `dispatch.decision` is an append-only fact.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DispatchRecord {
+    pub task_id: String,
+    pub turn_id: String,
+    pub stage_id: String,
+    pub worker_id: String,
+    pub worker_name: String,
+    pub score: f64,
+    pub reason: String,
+    /// Runners-up with their scores, already formatted.
+    pub alternatives: String,
+    pub seq: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Derived context — the message array the model would actually receive.
+// ---------------------------------------------------------------------------
+
+/// One message in a derived context. `source_seqs` are log positions, so the
+/// UI can prove which facts produced this message ("model-visible means logged").
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextMessage {
+    /// "system" | "user" | "assistant" | "tool"
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Value>,
+    pub source_seqs: Vec<u64>,
+}
+
+/// The whole context for one work order, plus the exact request body.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DerivedContext {
+    pub task_id: String,
+    pub turn_id: String,
+    pub stage: String,
+    pub worker_id: String,
+    pub messages: Vec<ContextMessage>,
+    pub tokens_estimate: u64,
+    pub budget: u64,
+    #[serde(default)]
+    pub dropped: u32,
+    pub tools: Vec<String>,
+    /// Snapshot of the JSON body the adapter would POST (secret-free).
+    pub model_request: Value,
+}
+
+// ---------------------------------------------------------------------------
 // Workshop projection — derived from the log, never stored as truth.
 // ---------------------------------------------------------------------------
 
@@ -331,6 +391,8 @@ pub struct Metrics {
     pub failed: u32,
     pub throughput: f64,
     pub llm_calls: u32,
+    /// How many assignments the dispatcher has made this shift.
+    pub dispatched: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -352,6 +414,8 @@ pub struct Snapshot {
     pub items: Vec<ItemInfo>,
     /// Equipment ledger, projected from tool.call / tool.result facts.
     pub tools: Vec<ToolView>,
+    /// Recent dispatcher decisions, projected from dispatch.decision facts.
+    pub dispatch: Vec<DispatchRecord>,
     /// Most recent session event, for the event-stream panel.
     pub last_event: Option<SessionEvent>,
 }

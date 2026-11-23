@@ -257,6 +257,28 @@ impl SessionStore {
         self.events.clone()
     }
 
+    /// Every fact belonging to one work order, oldest first. The scan runs
+    /// backwards and stops at the turn that opened the order, so deriving a
+    /// context stays cheap even when the log has tens of thousands of events.
+    pub fn task_events(&self, task_id: &str) -> Vec<SessionEvent> {
+        let mut out = Vec::new();
+        for ev in self.events.iter().rev() {
+            if ev.task_id.as_deref() == Some(task_id) {
+                out.push(ev.clone());
+                if ev.kind == "turn.started" {
+                    break;
+                }
+            }
+        }
+        out.reverse();
+        out
+    }
+
+    /// Most recent work order in the log — the default context to inspect.
+    pub fn latest_task_id(&self) -> Option<String> {
+        self.events.iter().rev().find_map(|e| e.task_id.clone())
+    }
+
     pub fn threads(&self) -> Vec<ThreadInfo> {
         let mut v: Vec<ThreadInfo> = self.threads.values().cloned().collect();
         v.sort_by(|a, b| a.created_at.cmp(&b.created_at));

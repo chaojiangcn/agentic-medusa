@@ -1,8 +1,9 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { selectSnapshot, useMedusaStore } from '@/lib/store'
 import { eventDetail, eventLabel } from '@/lib/rpc'
+import type { DerivedContext } from '@/lib/contract'
 
 const STATUS_LABEL: Record<string, string> = {
   busy: '忙碌',
@@ -31,9 +32,13 @@ export function UI() {
     frames, cursor, playing, speed, connected, error, selectedWorkerId,
     approval, config, threads, activeThread, protocolVersion, configHome,
   } = store
-  const [tab, setTab] = useState<'workers' | 'tools' | 'config' | 'protocol'>('workers')
+  const [tab, setTab] = useState<'workers' | 'tools' | 'dispatch' | 'config' | 'protocol'>('workers')
   const [busy, setBusy] = useState(false)
   const [toolResult, setToolResult] = useState<{ blocked: boolean; text: string } | null>(null)
+  const [context, setContext] = useState<DerivedContext | null>(null)
+  const [ctxTask, setCtxTask] = useState<string | null>(null)
+  const [ctxLoading, setCtxLoading] = useState(false)
+  const [requestOpen, setRequestOpen] = useState(false)
 
   const maxCursor = Math.max(0, frames.length - 1)
   const recent = frames
@@ -46,6 +51,7 @@ export function UI() {
   const workers = snapshot?.workers ?? []
   const tools = snapshot?.tools ?? []
   const toolCalls = tools.reduce((sum, tool) => sum + tool.calls, 0)
+  const dispatch = snapshot?.dispatch ?? []
   const selected = workers.find((worker) => worker.id === selectedWorkerId) ?? workers[0]
   const stageIndex = snapshot?.stages.findIndex((stage) => stage.id === selected?.stageId) ?? -1
   const nextStage = snapshot?.stages[(stageIndex + 1) % (snapshot?.stages.length || 1)]
@@ -76,6 +82,46 @@ export function UI() {
     }
   }
 
+  // Derive the model context server-side from the log — the browser never
+  // assembles a prompt, it only inspects what the App Server would send.
+  const loadContext = async (taskId?: string) => {
+    setCtxLoading(true)
+    try {
+      const res = await store.call<DerivedContext>(
+        'session/context',
+        taskId ? { taskId } : {},
+      )
+      setContext(res)
+      setCtxTask(res.taskId)
+    } catch {
+      setContext(null)
+    } finally {
+      setCtxLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (tab !== 'dispatch') return
+    let cancelled = false
+    const call = useMedusaStore.getState().call
+    setCtxLoading(true)
+    call<DerivedContext>('session/context', {})
+      .then((res) => {
+        if (cancelled) return
+        setContext(res)
+        setCtxTask(res.taskId)
+      })
+      .catch(() => {
+        if (!cancelled) setContext(null)
+      })
+      .finally(() => {
+        if (!cancelled) setCtxLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [tab])
+
   return (
     <div className="overlay">
       <header className="topbar">
@@ -98,6 +144,7 @@ export function UI() {
         <div className="tabs">
           <button className={tab === 'workers' ? 'active' : ''} onClick={() => setTab('workers')}>车间</button>
           <button className={tab === 'tools' ? 'active' : ''} onClick={() => setTab('tools')}>设备</button>
+          <button className={tab === 'dispatch' ? 'active' : ''} onClick={() => setTab('dispatch')}>派单</button>
           <button className={tab === 'config' ? 'active' : ''} onClick={() => setTab('config')}>配置</button>
           <button className={tab === 'protocol' ? 'active' : ''} onClick={() => setTab('protocol')}>协议</button>
         </div>
@@ -193,6 +240,82 @@ export function UI() {
           </section>
         )}
 
+        {tab === 'dispatch' && (
+          <>
+            <section>
+              <h3>派单台 · 最近决策</h3>
+              <p className="note">
+                工单进哪个工位、交给谁，由调度规则按「工位匹配 / 空闲 / 负载 / 阻塞」打分，
+                决策和理由都是日志里的事实，不是前端猜的。
+              </p>
+              {dispatch.length === 0 && <p className="empty">还没有派单记录，等下一张工单…</p>}
+              {dispatch.slice().reverse().map((d) => (
+                <div className="dispatch-row" key={d.seq}>
+                  <div className="dispatch-head">
+                    <b>{d.taskId} → {d.stageId}</b>
+                    <span className="dispatch-score">{d.score.toFixed(2)}</span>
+                  </div>
+                  <small>{d.workerName}（{d.workerId}） · {d.reason}</small>
+                  {d.alternatives && <small>备选：{d.alternatives}</small>}
+                  <small className="dispatch-seq">seq {d.seq}</small>
+                </div>
+              ))}
+            </section>
+
+            <section>
+              <h3>工人看到的上下文</h3>
+              <p className="note">
+                从 append-only 日志派生：工位 SOP、上游结论、设备小票。每条都带来源 seq，
+                底部是 App Server 会原样发出去的请求体。
+              </p>
+              <div className="btn-row">
+                <button disabled={ctxLoading} onClick={() => void loadContext()}>最新工单</button>
+                <button disabled={ctxLoading || !ctxTask} onClick={() => void loadContext(ctxTask ?? undefined)}>刷新</button>
+                <button disabled={!context} onClick={() => setRequestOpen(true)}>请求体</button>
+              </div>
+              {ctxLoading && <p className="empty">派生中…</p>}
+              {!ctxLoading && !context && <p className="empty">还没有可派生的工单。</p>}
+              {context && (
+                <>
+                  <div className="kv"><span>工单</span><code>{context.taskId}</code></div>
+                  <div className="kv"><span>工位 · 工人</span><code>{context.stage || '—'} · {context.workerId || '—'}</code></div>
+                  <div className="kv"><span>消息 · 估算</span><code>{context.messages.length} 条 · ~{context.tokensEstimate} tok</code></div>
+                  <div className="kv"><span>预算</span><code>{context.tokensEstimate} / {context.budget}</code></div>
+                  {context.dropped > 0 && <p className="note">超出预算，已省略 {context.dropped} 条较早记录。</p>}
+                  {context.messages.map((m, i) => (
+                    <div className={'ctx-msg ' + m.role} key={`${m.role}-${i}`}>
+                      <div className="ctx-head">
+                        <span className="ctx-role">{m.role}{m.name ? ' · ' + m.name : ''}</span>
+                        <span className="ctx-seqs">
+                          {m.sourceSeqs.length ? 'seq ' + m.sourceSeqs.slice(0, 3).join(',') : '派生'}
+                        </span>
+                      </div>
+                      <p>{m.content}</p>
+                    </div>
+                  ))}
+                  <p className="note" style={{ marginTop: 8 }}>
+                    这就是模型会收到的全部内容。点「请求体」可以看 App Server 原样 POST 的 JSON。
+                  </p>
+                </>
+              )}
+            </section>
+
+            <section>
+              <h3>工单列表</h3>
+              {(snapshot?.turns ?? []).slice(-8).reverse().map((t) => (
+                <button
+                  key={t.id}
+                  className={'thread-row' + (ctxTask === t.taskId ? ' active' : '')}
+                  onClick={() => void loadContext(t.taskId)}
+                >
+                  <b>{t.taskId}</b>
+                  <small>{t.status} · {t.items} items · {t.tokens} tok</small>
+                </button>
+              ))}
+            </section>
+          </>
+        )}
+
         {tab === 'config' && (
           <section>
             <h3>模型配置 · 进程侧</h3>
@@ -262,14 +385,15 @@ export function UI() {
             <div className="metric"><span>LLM 调用</span><b>{snapshot?.metrics.llmCalls ?? 0}</b></div>
             <div className="metric"><span>设备</span><b>{tools.length}</b></div>
             <div className="metric"><span>设备调用</span><b>{toolCalls}</b></div>
+            <div className="metric"><span>派单</span><b>{snapshot?.metrics.dispatched ?? 0}</b></div>
           </div>
         </section>
 
         <section className="stream">
           <h3>事件流 · 当前帧往前 8 条</h3>
           {recent.length === 0 && <p className="empty">暂无事件</p>}
-          {recent.map((frame) => (
-            <div className="event-row" key={frame.event.seq}>
+          {recent.map((frame, index) => (
+            <div className="event-row" key={`${frame.event.seq}-${index}`}>
               <span className="event-seq">#{frame.event.seq}</span>
               <div>
                 <b>{eventLabel(frame.event.kind)}</b>
@@ -307,6 +431,21 @@ export function UI() {
           <span>最新 · {maxCursor}</span>
         </div>
       </footer>
+
+      {requestOpen && context && (
+        <div className="approval-backdrop" onClick={() => setRequestOpen(false)}>
+          <div className="request-card" onClick={(event) => event.stopPropagation()}>
+            <div className="request-head">
+              <div>
+                <b>模型请求体 · {context.taskId}</b>
+                <small>由会话日志派生，不含 API Key</small>
+              </div>
+              <button onClick={() => setRequestOpen(false)}>关闭</button>
+            </div>
+            <pre className="request-pre">{JSON.stringify(context.modelRequest, null, 2)}</pre>
+          </div>
+        </div>
+      )}
 
       {approval && (
         <div className="approval-backdrop">

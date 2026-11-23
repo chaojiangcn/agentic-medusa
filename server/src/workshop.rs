@@ -3,8 +3,8 @@
 //! patrol / inspection / approval behaviour. State is a projection of the
 //! append-only session log.
 
-use crate::config::ConfigStore;
-use crate::llm::{complete_blocking, mock_text, LlmClient};
+use crate::dispatch::{decide, Decision};
+use crate::llm::{complete_messages_blocking, mock_text, LlmClient};
 use crate::protocol::*;
 use crate::rpc::{AppState, ApprovalReply};
 use crate::tools::{sample_args, ToolRegistry};
@@ -20,10 +20,14 @@ const STAGES: [(&str, &str, f64, &str); 3] = [
     ("review", "工位 C · 质检", 5.0, "#1d9e75"),
 ];
 
-const WORKERS: [(&str, &str, &str, &str); 3] = [
+// Four workers for three stations: `w4` is the floater the dispatcher pulls
+// into a station when its regular is busy or blocked. That is the whole point
+// of a dispatcher — otherwise the assignment is just a constant.
+const WORKERS: [(&str, &str, &str, &str); 4] = [
     ("w1", "检索员", "intake", "provider-a"),
     ("w2", "分析员", "analysis", "provider-b"),
     ("w3", "质检员", "review", "provider-c"),
+    ("w4", "机动员", "review", "provider-c"),
 ];
 
 const TASK_TITLES: &[&str] = &[
@@ -235,6 +239,42 @@ pub fn project(snap: &mut Snapshot, ev: &SessionEvent) {
                 t.last_receipt = s("receipt");
             }
         }
+        "dispatch.decision" => {
+            let record = DispatchRecord {
+                task_id: s("taskId"),
+                turn_id: ev.turn_id.clone().unwrap_or_default(),
+                stage_id: s("stageId"),
+                worker_id: s("workerId"),
+                worker_name: s("workerName"),
+                score: n("score"),
+                reason: s("reason"),
+                alternatives: s("alternatives"),
+                seq: ev.seq,
+            };
+            let stage_id = record.stage_id.clone();
+            let task_id = record.task_id.clone();
+            snap.dispatch.push(record);
+            if snap.dispatch.len() > 6 {
+                snap.dispatch.remove(0);
+            }
+            snap.metrics.dispatched += 1;
+            // The boss is the one assigning work, so it walks to the station —
+            // standing to the side, not on top of the worker it just assigned.
+            if let Some(stage) = STAGES.iter().find(|(id, _, _, _)| *id == stage_id.as_str()) {
+                snap.boss.x = stage.2 + 2.6;
+                snap.boss.z = 2.8;
+                snap.boss.mode = "dispatch".into();
+                snap.boss.target_stage_id = stage_id.clone();
+                snap.boss.note = format!("派遣 {}", task_id);
+            }
+        }
+        "worker.assigned" => {
+            let wid = s("workerId");
+            let sid = s("stageId");
+            if let Some(w) = snap.workers.iter_mut().find(|w| w.id == wid) {
+                w.stage_id = sid;
+            }
+        }
         "config.updated" => {
             let model = s("model");
             for w in &mut snap.workers {
@@ -250,7 +290,16 @@ fn apply_control(snap: &mut Snapshot, p: &Value) {
     let action = p.get("action").and_then(Value::as_str).unwrap_or("");
     match action {
         "pause" => snap.playing = false,
-        "resume" => snap.playing = true,
+        "resume" => {
+            snap.playing = true;
+            // A previous shift may have ended with a stop; a resume puts the
+            // paused crew back on the floor instead of leaving them frozen.
+            for w in &mut snap.workers {
+                if w.status == "paused" {
+                    w.status = "idle".into();
+                }
+            }
+        }
         "stop" => {
             snap.playing = false;
             for w in &mut snap.workers {
@@ -310,13 +359,68 @@ pub struct ApprovalPlan {
     pub turn_id: String,
 }
 
+/// Turn one dispatcher decision into append-only facts: the reasoning first,
+/// then the move if a floater has to change station.
+pub fn dispatch_events(
+    thread_id: &str,
+    task_id: &str,
+    turn_id: &str,
+    d: &Decision,
+) -> Vec<SessionEvent> {
+    let mut out = Vec::new();
+    let mut decision = SessionEvent::new(
+        0,
+        thread_id,
+        "dispatch.decision",
+        "dispatcher",
+        json!({
+            "taskId": task_id, "stageId": d.stage_id, "workerId": d.worker_id,
+            "workerName": d.worker_name, "score": d.score, "reason": d.reason,
+            "alternatives": d.alternatives,
+            "note": format!("{} → {} · {}", task_id, d.stage_id, d.reason)
+        }),
+    )
+    .with_task(task_id)
+    .with_worker(&d.worker_id)
+    .with_stage(&d.stage_id);
+    if !turn_id.is_empty() {
+        decision = decision.with_turn(turn_id);
+    }
+    out.push(decision);
+    if let Some(from) = &d.reassign_from {
+        let mut assigned = SessionEvent::new(
+            0,
+            thread_id,
+            "worker.assigned",
+            "dispatcher",
+            json!({
+                "workerId": d.worker_id, "stageId": d.stage_id, "from": from,
+                "note": format!(
+                    "{} 从 {} 调往 {}",
+                    d.worker_name,
+                    if from.is_empty() { "待命区" } else { from.as_str() },
+                    d.stage_id
+                )
+            }),
+        )
+        .with_task(task_id)
+        .with_worker(&d.worker_id)
+        .with_stage(&d.stage_id);
+        if !turn_id.is_empty() {
+            assigned = assigned.with_turn(turn_id);
+        }
+        out.push(assigned);
+    }
+    out
+}
+
 pub fn plan_tick(snap: &Snapshot, tick: u64, counter: &mut u64, seed: &mut u64) -> TickPlan {
     let mut events = Vec::new();
     *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     let rnd = || -> f64 { ((*seed >> 33) as f64) / (u32::MAX as f64) };
 
     let thread_id = snap.thread_id.clone();
-    let bx = -6.0 + 12.0 * (0.5 + 0.5 * (tick as f64 * 0.11).sin());
+    let bx = -5.0 + 10.0 * (0.5 + 0.5 * (tick as f64 * 0.11).sin());
 
     if tick % 3 == 0 {
         events.push(
@@ -372,14 +476,25 @@ pub fn plan_tick(snap: &Snapshot, tick: u64, counter: &mut u64, seed: &mut u64) 
             .with_turn(&turn_id)
             .with_task(&task_id),
         );
+        // Intake is a dispatch decision too, not a constant. The pick and its
+        // reasoning go into the log before the worker starts the item.
+        let pick = decide("intake", &snap.workers);
+        let worker_id = match &pick {
+            Some(decision) => {
+                events.extend(dispatch_events(&thread_id, &task_id, &turn_id, decision));
+                decision.worker_id.clone()
+            }
+            None => "w1".to_string(),
+        };
         events.push(
-            SessionEvent::new(0, &thread_id, "item.started", "w1", json!({
-                "kind": "agentMessage", "stageId": "intake"
+            SessionEvent::new(0, &thread_id, "item.started", &worker_id, json!({
+                "kind": "agentMessage", "stageId": "intake",
+                "dispatched": pick.is_some()
             }))
             .with_turn(&turn_id)
             .with_item(&format!("item-{}-{}", task_id, crate::session::short_id()))
             .with_task(&task_id)
-            .with_worker("w1")
+            .with_worker(&worker_id)
             .with_stage("intake"),
         );
         if let Some(a) = approval.as_mut() {
@@ -390,50 +505,80 @@ pub fn plan_tick(snap: &Snapshot, tick: u64, counter: &mut u64, seed: &mut u64) 
     for task in &active {
         let progress = task.progress + 0.12 + rnd() * 0.18;
         let index = task.stage_index;
+        let turn_id = snap
+            .turns
+            .iter()
+            .rev()
+            .find(|t| t.task_id == task.id && t.status == "running")
+            .map(|t| t.id.clone())
+            .unwrap_or_default();
+        let holder = snap
+            .workers
+            .iter()
+            .find(|w| w.task_id.as_deref() == Some(task.id.as_str()))
+            .map(|w| w.id.clone());
         if progress >= 1.0 {
             if index + 1 >= STAGES.len() as i32 {
-                events.push(
-                    SessionEvent::new(0, &thread_id, "turn.completed", "w3", json!({
-                        "taskId": task.id, "workerId": "w3"
-                    }))
-                    .with_task(&task.id)
-                    .with_worker("w3")
-                    .with_stage("review"),
-                );
+                let finisher = holder.clone().unwrap_or_else(|| "w3".to_string());
+                let mut ev = SessionEvent::new(0, &thread_id, "turn.completed", &finisher, json!({
+                    "taskId": task.id, "workerId": finisher
+                }))
+                .with_task(&task.id)
+                .with_worker(&finisher)
+                .with_stage("review");
+                if !turn_id.is_empty() {
+                    ev = ev.with_turn(&turn_id);
+                }
+                events.push(ev);
                 continue;
             }
             let next = (index + 1) as usize;
             let (sid, _n, _x, _c) = STAGES[next];
-            let wid = WORKERS[next].0;
-            events.push(
-                SessionEvent::new(0, &thread_id, "item.started", wid, json!({
-                    "kind": "agentMessage", "stageId": sid
-                }))
-                .with_item(&format!("item-{}-{}", task.id, crate::session::short_id()))
-                .with_task(&task.id)
-                .with_worker(wid)
-                .with_stage(sid),
-            );
-            events.push(
-                SessionEvent::new(0, &thread_id, "task.moved", wid, json!({
-                    "stageIndex": next, "progress": 0.0
-                }))
-                .with_task(&task.id)
-                .with_worker(wid)
-                .with_stage(sid),
-            );
+            // Hand-off is dispatched too: whoever is free at the next station
+            // takes it, and a floater may be moved there first.
+            let pick = decide(sid, &snap.workers);
+            let wid = match &pick {
+                Some(decision) => {
+                    events.extend(dispatch_events(&thread_id, &task.id, &turn_id, decision));
+                    decision.worker_id.clone()
+                }
+                None => WORKERS[next].0.to_string(),
+            };
+            let mut started = SessionEvent::new(0, &thread_id, "item.started", &wid, json!({
+                "kind": "agentMessage", "stageId": sid
+            }))
+            .with_item(&format!("item-{}-{}", task.id, crate::session::short_id()))
+            .with_task(&task.id)
+            .with_worker(&wid)
+            .with_stage(sid);
+            if !turn_id.is_empty() {
+                started = started.with_turn(&turn_id);
+            }
+            events.push(started);
+            let mut moved = SessionEvent::new(0, &thread_id, "task.moved", &wid, json!({
+                "stageIndex": next, "progress": 0.0
+            }))
+            .with_task(&task.id)
+            .with_worker(&wid)
+            .with_stage(sid);
+            if !turn_id.is_empty() {
+                moved = moved.with_turn(&turn_id);
+            }
+            events.push(moved);
         } else {
             let slot = (index as usize).min(STAGES.len() - 1);
             let (sid, _n, _x, _c) = STAGES[slot];
-            let wid = WORKERS[slot].0;
-            events.push(
-                SessionEvent::new(0, &thread_id, "task.moved", wid, json!({
-                    "stageIndex": index, "progress": progress
-                }))
-                .with_task(&task.id)
-                .with_worker(wid)
-                .with_stage(sid),
-            );
+            let wid = holder.unwrap_or_else(|| WORKERS[slot].0.to_string());
+            let mut moved = SessionEvent::new(0, &thread_id, "task.moved", &wid, json!({
+                "stageIndex": index, "progress": progress
+            }))
+            .with_task(&task.id)
+            .with_worker(&wid)
+            .with_stage(sid);
+            if !turn_id.is_empty() {
+                moved = moved.with_turn(&turn_id);
+            }
+            events.push(moved);
         }
     }
 
@@ -462,7 +607,7 @@ pub fn plan_tick(snap: &Snapshot, tick: u64, counter: &mut u64, seed: &mut u64) 
 /// Emit a batch of facts: append to the log, project, then broadcast both the
 /// fine-grained UI notification and the replayable frame.
 pub async fn emit(state: &Arc<AppState>, ev: SessionEvent) -> anyhow::Result<Frame> {
-    let (stored, frame) = {
+    let (_stored, frame) = {
         let mut store = state.store.lock().await;
         let stored = store.append(ev)?;
         let mut snap = state.snapshot.lock().await;
@@ -502,6 +647,8 @@ fn ui_method(kind: &str) -> &'static str {
         "config.updated" => "config/updated",
         "tool.call" => "tool/call",
         "tool.result" => "tool/result",
+        "dispatch.decision" => "dispatch/decision",
+        "worker.assigned" => "worker/assigned",
         _ => "session/event",
     }
 }
@@ -519,6 +666,15 @@ pub async fn run_driver(state: Arc<AppState>) {
         &state,
         SessionEvent::new(0, "main", "run.started", "system", json!({
             "note": "班次开始，老板进场（app server 已接管运行时）"
+        })),
+    )
+    .await;
+    // A new process takes over the shift: if the replayed log ended stopped,
+    // resume explicitly so restarting the server doesn't leave a dead floor.
+    let _ = emit(
+        &state,
+        SessionEvent::new(0, "main", "system.control", "system", json!({
+            "action": "resume", "note": "新班次接管，流水线恢复"
         })),
     )
     .await;
@@ -610,24 +766,35 @@ async fn stream_item(
         let Some(p) = provider else { return };
         let Some(k) = key else { return };
         let cfg_snapshot = state.config.get();
-        let system = format!(
-            "你是 Medusa 流水线 {} 工位的 LLM 工人。只输出这一工位的工作结论，简短、具体，不超过 80 字。",
-            stage
-        );
-        let user = format!("工单 {}：请完成 {} 工位的工作。", task_id, stage);
+        // Rebuild the request from the log instead of hand-writing a prompt:
+        // upstream items, device receipts and the station's SOP are all facts.
+        let context = {
+            let store = state.store.lock().await;
+            let events = store.task_events(task_id);
+            crate::context::derive(&events, task_id, &cfg_snapshot)
+        };
+        let messages: Vec<Value> = context.messages.iter().map(crate::context::wire).collect();
+        let tools = ToolRegistry::builtin().as_model_tools();
+        let max_tokens = cfg_snapshot.max_tokens_per_turn;
         let p2 = p.clone();
         let k2 = k.clone();
-        let max_tokens = cfg_snapshot.max_tokens_per_turn;
-        let _ = max_tokens;
         // Own the budget counters so the closure satisfies 'static.
         let llm2: LlmClient = Clone::clone(llm);
         match tokio::task::spawn_blocking(move || {
             // ConfigStore isn't Clone, so re-read from the same home for the
-            // one value the blocking call needs.
+            // values the blocking call needs.
             let home = crate::config::resolve_home();
             let store = crate::config::ConfigStore::load(home).ok();
             match store {
-                Some(s) => complete_blocking(&s, &llm2, &p2, &k2, &system, &user),
+                Some(s) => complete_messages_blocking(
+                    &s,
+                    &llm2,
+                    &p2,
+                    &k2,
+                    &messages,
+                    Some(&tools),
+                    max_tokens,
+                ),
                 None => Err(anyhow::anyhow!("配置不可用")),
             }
         })

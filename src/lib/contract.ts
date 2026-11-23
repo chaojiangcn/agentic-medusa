@@ -121,6 +121,52 @@ export interface ToolOutcome {
 }
 
 // ---------------------------------------------------------------------------
+// Dispatch — who decided this work order goes to which station
+// ---------------------------------------------------------------------------
+
+/** A logged assignment; the reasoning is part of the record. */
+export interface DispatchRecord {
+  taskId: string
+  turnId: string
+  stageId: string
+  workerId: string
+  workerName: string
+  score: number
+  reason: string
+  /** Runners-up with their scores, pre-formatted. */
+  alternatives: string
+  seq: number
+}
+
+// ---------------------------------------------------------------------------
+// Derived context — what the model actually receives (from the log)
+// ---------------------------------------------------------------------------
+
+export interface ContextMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool' | string
+  name?: string
+  content: string
+  toolCallId?: string
+  toolCalls?: unknown
+  /** Log positions this message was derived from. */
+  sourceSeqs: number[]
+}
+
+export interface DerivedContext {
+  taskId: string
+  turnId: string
+  stage: string
+  workerId: string
+  messages: ContextMessage[]
+  tokensEstimate: number
+  budget: number
+  dropped: number
+  tools: string[]
+  /** The exact JSON body the adapter would POST (secret-free). */
+  modelRequest: Record<string, unknown>
+}
+
+// ---------------------------------------------------------------------------
 // Workshop projection (derived from the log)
 // ---------------------------------------------------------------------------
 
@@ -135,7 +181,7 @@ export interface Stage {
 
 export type WorkerStatus = 'idle' | 'busy' | 'blocked' | 'paused' | string
 export type TaskStatus = 'queued' | 'running' | 'done' | 'failed' | string
-export type BossMode = 'patrol' | 'inspect' | 'intervene' | string
+export type BossMode = 'patrol' | 'inspect' | 'intervene' | 'dispatch' | string
 
 export interface Worker {
   id: string
@@ -175,6 +221,8 @@ export interface Metrics {
   failed: number
   throughput: number
   llmCalls: number
+  /** Assignments made by the dispatcher this shift. */
+  dispatched: number
 }
 
 export interface Snapshot {
@@ -193,6 +241,8 @@ export interface Snapshot {
   turns: TurnInfo[]
   items: ItemInfo[]
   tools: ToolView[]
+  /** Recent dispatcher decisions, projected from dispatch.decision facts. */
+  dispatch: DispatchRecord[]
   lastEvent: SessionEvent | null
 }
 

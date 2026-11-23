@@ -219,6 +219,8 @@ export function eventLabel(kind: string): string {
     'config.updated': '配置更新',
     'tool.call': '设备启动',
     'tool.result': '结果小票',
+    'dispatch.decision': '派单决策',
+    'worker.assigned': '工人调岗',
     'external.event': '外部上报',
     'session.event': '会话事件',
   }

@@ -16,7 +16,7 @@ use crate::tools::{sample_args, ToolRegistry};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        Query, State,
     },
     http::{header, Method, StatusCode},
     middleware::{self, Next},
@@ -104,6 +104,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/config", get(config_read))
         .route("/api/config", post(config_write))
         .route("/api/tools", get(tools_read))
+        .route("/api/context", get(context_read))
         .route("/api/events", post(ingest))
         .route("/api/control", post(control))
         .route("/api/stream", get(sse))
@@ -160,12 +161,14 @@ async fn protocol_info() -> impl IntoResponse {
             "initialize", "thread/start", "thread/list", "thread/resume",
             "thread/fork", "thread/read", "turn/start", "turn/interrupt",
             "control", "config/read", "config/write", "event/ingest",
-            "session/replay", "approval/respond", "tools/list", "tools/call"
+            "session/replay", "session/context", "approval/respond",
+            "tools/list", "tools/call"
         ],
         "notifications": [
             "thread/started", "turn/started", "turn/completed", "turn/interrupted",
             "item/started", "item/agentMessage/delta", "item/completed",
             "boss/patrol", "boss/inspection", "boss/intervention",
+            "dispatch/decision", "worker/assigned",
             "tool/call", "tool/result",
             "workshop/snapshot", "system/control", "config/updated", "session/event"
         ],
@@ -229,6 +232,45 @@ async fn tools_read(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         Ok(value) => Json(value),
         Err((_, message)) => Json(json!({ "error": message })),
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct ContextQuery {
+    #[serde(default, rename = "taskId")]
+    task_id: Option<String>,
+}
+
+/// Derive the model context for one work order (REST shim over session/context).
+async fn context_read(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ContextQuery>,
+) -> impl IntoResponse {
+    match build_context(&state, q.task_id.as_deref()).await {
+        Ok(ctx) => Json(serde_json::to_value(ctx).unwrap_or_else(|_| json!({}))),
+        Err(message) => Json(json!({ "ok": false, "error": message })),
+    }
+}
+
+/// Rebuild one work order's context from the append-only log. This is the
+/// `deriveMessages` step: no stored prompt, only facts.
+async fn build_context(
+    state: &Arc<AppState>,
+    task_id: Option<&str>,
+) -> Result<DerivedContext, String> {
+    let task = match task_id {
+        Some(t) if !t.is_empty() => t.to_string(),
+        _ => state
+            .store
+            .lock()
+            .await
+            .latest_task_id()
+            .ok_or_else(|| "该线程还没有工单".to_string())?,
+    };
+    let events = state.store.lock().await.task_events(&task);
+    if events.is_empty() {
+        return Err(format!("找不到工单 {task} 的日志"));
+    }
+    Ok(crate::context::derive(&events, &task, &state.config.get()))
 }
 
 async fn config_read(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -311,7 +353,7 @@ async fn ingest(
 }
 
 async fn emit_external(state: &Arc<AppState>, ev: SessionEvent) -> anyhow::Result<Frame> {
-    let (stored, frame) = {
+    let (_stored, frame) = {
         let mut store = state.store.lock().await;
         let stored = store.ingest(ev)?;
         let mut snap = state.snapshot.lock().await;
@@ -576,7 +618,9 @@ async fn dispatch(
                     "stdio": true,
                     "websocket": true,
                     "tools": true,
-                    "toolCall": true
+                    "toolCall": true,
+                    "dispatch": true,
+                    "context": "deriveMessages"
                 },
                 "configHome": state.config.home.display().to_string(),
                 "config": state.config.view(),
@@ -687,33 +731,56 @@ async fn dispatch(
             )
             .await
             .map_err(|e| (ERR_INVALID_PARAMS, e.to_string()))?;
+
+            // A human order goes through the same dispatcher as generated
+            // work: the assignment and its reasoning are logged facts.
+            let workers = state.snapshot.lock().await.workers.clone();
+            let decision = crate::dispatch::decide("intake", &workers);
+            let worker_id = match &decision {
+                Some(d) => {
+                    for ev in crate::workshop::dispatch_events(&thread, &task_id, &turn_id, d) {
+                        emit(state, ev)
+                            .await
+                            .map_err(|e| (ERR_INVALID_PARAMS, e.to_string()))?;
+                    }
+                    d.worker_id.clone()
+                }
+                None => "w1".to_string(),
+            };
             emit(
                 state,
-                SessionEvent::new(0, &thread, "item.started", "w1", json!({
+                SessionEvent::new(0, &thread, "item.started", &worker_id, json!({
                     "kind": "agentMessage", "stageId": "intake"
                 }))
                 .with_turn(&turn_id)
                 .with_item(&item_id)
                 .with_task(&task_id)
-                .with_worker("w1")
+                .with_worker(&worker_id)
                 .with_stage("intake"),
             )
             .await
             .map_err(|e| (ERR_INVALID_PARAMS, e.to_string()))?;
             emit(
                 state,
-                SessionEvent::new(0, &thread, "item.agentMessage.delta", "w1", json!({
+                SessionEvent::new(0, &thread, "item.agentMessage.delta", &worker_id, json!({
                     "delta": "人工投料：已接收，进入检索工位。", "tokens": 12
                 }))
                 .with_turn(&turn_id)
                 .with_item(&item_id)
                 .with_task(&task_id)
-                .with_worker("w1")
+                .with_worker(&worker_id)
                 .with_stage("intake"),
             )
             .await
             .map_err(|e| (ERR_INVALID_PARAMS, e.to_string()))?;
-            Ok(json!({ "turnId": turn_id, "taskId": task_id, "status": "running" }))
+            Ok(json!({
+                "turnId": turn_id, "taskId": task_id, "status": "running",
+                "workerId": worker_id,
+                "dispatch": decision.map(|d| json!({
+                    "stageId": d.stage_id, "workerId": d.worker_id,
+                    "score": d.score, "reason": d.reason
+                }))
+            }))
         }
         "turn/interrupt" => {
             let thread = state.active_thread.lock().await.clone();
@@ -895,6 +962,18 @@ async fn dispatch(
             };
             let after = params.get("afterSeq").and_then(Value::as_u64).unwrap_or(0);
             Ok(json!({ "frames": build_frames(state, &thread, after).await }))
+        }
+
+        // deriveMessages: rebuild one work order's context from the log.
+        "session/context" => {
+            let requested = s("taskId");
+            let ctx = build_context(
+                state,
+                if requested.is_empty() { None } else { Some(requested.as_str()) },
+            )
+            .await
+            .map_err(|e| (ERR_INVALID_PARAMS, e))?;
+            Ok(serde_json::to_value(ctx).unwrap())
         }
 
         "event/ingest" => {

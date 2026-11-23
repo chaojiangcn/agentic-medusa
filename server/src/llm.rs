@@ -8,7 +8,7 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// Cloneable so the blocking worker can carry the same budget counters.
 #[derive(Clone)]
@@ -43,14 +43,17 @@ fn unix_secs() -> u64 {
         .as_secs()
 }
 
-/// One blocking request. Callers must use `spawn_blocking`.
-pub fn complete_blocking(
+/// Send a derived message array. This is the path the driver uses: `messages`
+/// comes from `context::derive`, so what the log calls "model-visible" is
+/// literally what goes out on the wire.
+pub fn complete_messages_blocking(
     cfg: &ConfigStore,
     client: &LlmClient,
     provider: &ModelProvider,
     key: &str,
-    system: &str,
-    user: &str,
+    messages: &[Value],
+    tools: Option<&Value>,
+    max_tokens: u64,
 ) -> Result<LlmResult> {
     if !client.budget_left(cfg) {
         return Err(anyhow!("预算闸口：本分钟调用次数已达上限"));
@@ -60,30 +63,43 @@ pub fn complete_blocking(
     let started = Instant::now();
     let base = provider.base_url.trim_end_matches('/');
     let (url, body) = if provider.wire_api == "responses" {
+        // The Responses API has a different tool-calling shape; keep the
+        // conversation roles it understands and skip tools for now.
+        let input: Vec<Value> = messages
+            .iter()
+            .filter_map(|m| {
+                let role = m.get("role").and_then(Value::as_str)?;
+                if role == "system" || role == "user" || role == "assistant" {
+                    Some(json!({
+                        "role": role,
+                        "content": m.get("content").cloned().unwrap_or_else(|| json!(""))
+                    }))
+                } else {
+                    None
+                }
+            })
+            .collect();
         (
-            format!("{}/responses", base),
+            format!("{base}/responses"),
             json!({
                 "model": provider.model,
-                "input": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user}
-                ],
-                "max_output_tokens": cfg.get().max_tokens_per_turn.min(4000)
+                "input": input,
+                "max_output_tokens": max_tokens.min(4000)
             }),
         )
     } else {
-        (
-            format!("{}/chat/completions", base),
-            json!({
-                "model": provider.model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user}
-                ],
-                "max_tokens": cfg.get().max_tokens_per_turn.min(4000),
-                "stream": false
-            }),
-        )
+        let mut body = json!({
+            "model": provider.model,
+            "messages": messages,
+            "max_tokens": max_tokens.min(4000),
+            "stream": false
+        });
+        if let Some(t) = tools {
+            if t.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
+                body["tools"] = t.clone();
+            }
+        }
+        (format!("{base}/chat/completions"), body)
     };
 
     // The local process issues the request, not the browser. We shell out to
@@ -130,11 +146,17 @@ pub fn complete_blocking(
     let text = if provider.wire_api == "responses" {
         extract_responses_text(&value)
     } else {
-        value
+        let content = value
             .pointer("/choices/0/message/content")
             .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string()
+            .unwrap_or("");
+        if content.trim().is_empty() {
+            // A model that answers with a tool call has no content. Surface the
+            // intent instead of an empty item; executing it is the next layer.
+            extract_tool_intent(&value)
+        } else {
+            content.to_string()
+        }
     };
 
     let usage = value.get("usage");
@@ -148,6 +170,30 @@ pub fn complete_blocking(
         tokens,
         latency_ms: started.elapsed().as_millis() as u64,
     })
+}
+
+fn extract_tool_intent(v: &Value) -> String {
+    let Some(calls) = v
+        .pointer("/choices/0/message/tool_calls")
+        .and_then(Value::as_array)
+    else {
+        return String::new();
+    };
+    let parts: Vec<String> = calls
+        .iter()
+        .map(|c| {
+            let name = c
+                .pointer("/function/name")
+                .and_then(Value::as_str)
+                .unwrap_or("?");
+            let args = c
+                .pointer("/function/arguments")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            format!("[模型请求调用设备] {name}({args})")
+        })
+        .collect();
+    parts.join(" ")
 }
 
 fn extract_responses_text(v: &Value) -> String {
