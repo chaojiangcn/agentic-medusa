@@ -5,7 +5,7 @@ import { Html, OrbitControls } from '@react-three/drei'
 import * as THREE from 'three'
 import { useRef } from 'react'
 import { selectSnapshot, useMedusaStore } from '@/lib/store'
-import type { Boss, DispatchRecord, Stage, ToolView, Worker, WorkTask } from '@/lib/contract'
+import type { Boss, CameraView, DispatchRecord, Stage, ToolView, Worker, WorkTask } from '@/lib/contract'
 
 const STATUS_COLOR: Record<string, string> = {
   busy: '#534ab7',
@@ -84,17 +84,19 @@ function WorkerFigure({
 }
 
 function TaskCrate({ task, offset }: { task: WorkTask; offset: number }) {
-  if (task.status === 'done') return null
+  // Not `return null`: dropping the group unmounts its drei Html root, which
+  // trips React's sync-unmount guard while the scene is rendering. Hide it.
+  const done = task.status === 'done'
   const x = -6 + (task.stageIndex + task.progress) * 4
   const color = task.status === 'failed' ? '#d93f3f' : '#185fa5'
   return (
-    <group position={[x, 0.6, 3.2 + offset]}>
+    <group visible={!done} position={[x, 0.6, 3.2 + offset]}>
       <mesh castShadow>
         <boxGeometry args={[0.46, 0.38, 0.46]} />
         <meshStandardMaterial color={color} />
       </mesh>
       <Html center zIndexRange={[5, 0]} distanceFactor={18} position={[0, 0.5, 0]}>
-        <div className="task-tag">{task.id}</div>
+        <div className="task-tag" style={{ opacity: done ? 0 : 1 }}>{task.id}</div>
       </Html>
     </group>
   )
@@ -160,6 +162,8 @@ function Conveyor() {
 
 function ToolDevice({ tool, x, recent }: { tool: ToolView; x: number; recent: boolean }) {
   const color = recent ? '#1d9e75' : tool.permission === 'approval' ? '#ba7517' : '#9aa3b2'
+  const showReceipt = recent && Boolean(tool.lastReceipt)
+  const receipt = tool.lastReceipt.length > 14 ? tool.lastReceipt.slice(0, 13) + '…' : tool.lastReceipt
   return (
     <group position={[x, 0.38, 0.95]}>
       <mesh castShadow>
@@ -174,13 +178,14 @@ function ToolDevice({ tool, x, recent }: { tool: ToolView; x: number; recent: bo
         <cylinderGeometry args={[0.025, 0.025, 0.14, 8]} />
         <meshStandardMaterial color={recent ? '#0f6e56' : '#6b7280'} />
       </mesh>
-      {recent && tool.lastReceipt && (
-        <Html center zIndexRange={[5, 0]} distanceFactor={16} position={[0, 0.78, 0]}>
-          <div className="tool-receipt">
-            {tool.lastReceipt.length > 14 ? tool.lastReceipt.slice(0, 13) + '…' : tool.lastReceipt}
-          </div>
-        </Html>
-      )}
+      {/* The receipt label stays mounted on purpose: drei's Html unmounts its
+          React root synchronously, which trips React's "unmount while
+          rendering" guard when it happens on a snapshot update. Fade it. */}
+      <Html center zIndexRange={[5, 0]} distanceFactor={16} position={[0, 0.78, 0]}>
+        <div className="tool-receipt" style={{ opacity: showReceipt ? 1 : 0 }}>
+          {showReceipt ? receipt : ''}
+        </div>
+      </Html>
       <Html center zIndexRange={[5, 0]} distanceFactor={18} position={[0, -0.34, 0]}>
         <div className={'tool-tag' + (recent ? ' active' : '')}>{tool.label}</div>
       </Html>
@@ -212,6 +217,68 @@ function DispatchBoard({ record }: { record?: DispatchRecord }) {
           <span>派单台 / DISPATCH</span>
           <b>{record ? `${record.taskId} → ${record.stageId}` : '待命中'}</b>
           <small>{record ? `${record.workerName} · ${record.score.toFixed(2)}` : '等待新工单'}</small>
+        </div>
+      </Html>
+    </group>
+  )
+}
+
+function CameraRig({ camera }: { camera: CameraView }) {
+  const lamp = useRef<THREE.Mesh>(null)
+  useFrame(({ clock }) => {
+    if (!lamp.current) return
+    const mat = lamp.current.material as THREE.MeshStandardMaterial
+    const t = clock.getElapsedTime()
+    // Blinking REC lamp; faster when the camera has something to report.
+    mat.emissiveIntensity = camera.status === 'alert'
+      ? 0.9 + Math.sin(t * 8) * 0.5
+      : 0.35 + Math.sin(t * 2.5) * 0.2
+  })
+  const alert = camera.status === 'alert'
+  const color = alert ? '#d93f3f' : '#3c3489'
+  // Fixed viewpoints lean inward so their cones cover the shop floor.
+  const tilt: [number, number, number] = camera.position.x < -1
+    ? [0, 0, 0.3]
+    : camera.position.x > 1
+      ? [0, 0, -0.3]
+      : [-0.34, 0, 0]
+  return (
+    <group position={[camera.position.x, camera.position.y, camera.position.z]}>
+      <mesh position={[0, 0.9, 0]}>
+        <cylinderGeometry args={[0.035, 0.035, 1.8, 8]} />
+        <meshStandardMaterial color="#8b929c" />
+      </mesh>
+      <mesh position={[0, -0.05, 0]} castShadow>
+        <boxGeometry args={[0.62, 0.34, 0.42]} />
+        <meshStandardMaterial color={color} roughness={0.45} />
+      </mesh>
+      <mesh position={[0, -0.05, -0.32]} rotation={[Math.PI / 2, 0, 0]}>
+        <cylinderGeometry args={[0.14, 0.19, 0.3, 16]} />
+        <meshStandardMaterial color="#2c2c2a" />
+      </mesh>
+      <mesh position={[0, -0.05, -0.48]} rotation={[Math.PI / 2, 0, 0]}>
+        <cylinderGeometry args={[0.11, 0.11, 0.02, 16]} />
+        <meshStandardMaterial color={alert ? '#f7c7c7' : '#c9d6ff'} />
+      </mesh>
+      <mesh ref={lamp} position={[0.24, 0.11, -0.22]}>
+        <sphereGeometry args={[0.06, 12, 10]} />
+        <meshStandardMaterial color="#ff6b6b" emissive="#ff2d2d" emissiveIntensity={0.6} />
+      </mesh>
+      {/* A translucent cone: what this viewpoint can see. It is a hint, not
+          a real frustum — the actual record is the append-only log. */}
+      <mesh position={[0, -1.75, 0]} rotation={tilt}>
+        <coneGeometry args={[1.45, 3.5, 20, 1, true]} />
+        <meshBasicMaterial
+          color={alert ? '#d93f3f' : '#7f77dd'}
+          transparent
+          opacity={0.07}
+          side={THREE.DoubleSide}
+          depthWrite={false}
+        />
+      </mesh>
+      <Html center zIndexRange={[5, 0]} distanceFactor={20} position={[0, 0.66, 0]}>
+        <div className={'camera-tag' + (alert ? ' alert' : '')}>
+          <span className="cam-rec" />{camera.label} · {alert ? '盲区' : 'REC'}
         </div>
       </Html>
     </group>
@@ -285,10 +352,15 @@ function Scene() {
           labelLift={labelLifts[worker.id] ?? 0}
         />
       ))}
-      {snapshot.tasks.map((task, index) => (
+      {/* Only the newest crates: finished ones stay mounted but hidden, so a
+          long shift never grows an unbounded HTML label layer. */}
+      {snapshot.tasks.slice(-10).map((task, index) => (
         <TaskCrate key={task.id} task={task} offset={((index % 3) - 1) * 0.36} />
       ))}
       <DispatchBoard record={lastDispatch} />
+      {(snapshot.cameras ?? []).map((camera) => (
+        <CameraRig key={camera.id} camera={camera} />
+      ))}
       <BossFigure boss={snapshot.boss} />
     </>
   )

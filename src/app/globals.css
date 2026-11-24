@@ -357,3 +357,72 @@ button { cursor: pointer; }
   background: #1f2328; color: #e6e6e6; border-radius: 8px; padding: 12px;
   font-family: var(--mono); font-size: 10.5px; line-height: 1.5; white-space: pre;
 }
+
+/* --- Observation: cameras observe, never decide --- */
+.policy-strip {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  margin: 9px 0 10px; font-size: 10px; color: var(--text-2);
+}
+.policy-strip span:not(.perm-badge) {
+  border: 1px solid var(--border); border-radius: 5px;
+  padding: 2px 6px; background: #fff;
+}
+.coverage-bar {
+  height: 7px; border-radius: 4px; background: #e8ebf0;
+  overflow: hidden; margin: 9px 0 10px;
+}
+.coverage-bar div {
+  height: 100%; border-radius: 4px;
+  background: linear-gradient(90deg, #1d9e75, #7f77dd);
+  transition: width 0.4s ease;
+}
+.camera-row {
+  width: 100%; display: block; text-align: left;
+  border: 1px solid var(--border); background: var(--surface-solid);
+  border-radius: 8px; padding: 8px 10px; margin-bottom: 7px;
+}
+.camera-row:hover { border-color: var(--accent); }
+.camera-row-head { display: flex; align-items: center; gap: 6px; }
+.camera-row-head b { font-size: 11px; font-weight: 500; flex: 1; }
+.camera-row-head span { font-size: 9px; color: var(--text-3); }
+.camera-row small { display: block; font-size: 10px; color: var(--text-2); line-height: 1.5; margin-top: 3px; }
+.camera-row small.cam-note { color: var(--text-3); font-size: 9px; }
+.rec-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex: none;
+  background: var(--ok); box-shadow: 0 0 0 3px rgba(29, 158, 117, 0.15);
+}
+.rec-dot.alert { background: var(--bad); box-shadow: 0 0 0 3px rgba(217, 63, 63, 0.15); }
+.obs-row {
+  border: 1px solid var(--border); border-left: 3px solid #7f77dd;
+  border-radius: 7px; padding: 7px 9px; margin-bottom: 6px;
+  background: var(--surface-solid);
+}
+.obs-row.blindspot { border-left-color: var(--bad); background: #fff8f8; }
+.obs-head { display: flex; align-items: center; gap: 6px; }
+.obs-head b { font-family: var(--mono); font-size: 10px; font-weight: 600; flex: 1; word-break: break-all; }
+.obs-head small { font-family: var(--mono); font-size: 9px; color: var(--text-3); }
+.obs-kind {
+  font-size: 9px; padding: 1px 5px; border-radius: 4px;
+  background: var(--accent-soft); color: var(--accent); flex: none;
+}
+.obs-kind.blindspot { background: #fdeaea; color: #a32d2d; }
+.obs-row p { margin: 4px 0; font-size: 10.5px; line-height: 1.5; }
+.obs-row > small { font-family: var(--mono); font-size: 9px; color: var(--text-3); }
+.structural-row {
+  border: 1px dashed var(--border); border-radius: 7px;
+  padding: 7px 9px; margin-bottom: 6px; background: #fafbfd;
+}
+.structural-row code { font-family: var(--mono); font-size: 9.5px; color: #854f0b; }
+.structural-row p { margin: 3px 0 0; font-size: 10.5px; line-height: 1.5; color: var(--text-2); }
+.camera-tag {
+  pointer-events: none; white-space: nowrap; font-size: 10px;
+  padding: 3px 7px; border-radius: 6px;
+  background: rgba(255, 255, 255, 0.95); border: 1px solid #3c3489;
+  color: #3c3489; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+.camera-tag.alert { border-color: var(--bad); color: #a32d2d; }
+.cam-rec {
+  display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--bad); margin-right: 4px; vertical-align: 1px;
+}
+.tabs button { padding-left: 2px; padding-right: 2px; font-size: 10.5px; }

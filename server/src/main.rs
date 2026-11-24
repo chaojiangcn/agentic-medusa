@@ -13,6 +13,7 @@ mod config;
 mod context;
 mod dispatch;
 mod llm;
+mod observe;
 mod protocol;
 mod rpc;
 mod session;

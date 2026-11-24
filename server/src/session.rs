@@ -257,6 +257,13 @@ impl SessionStore {
         self.events.clone()
     }
 
+    /// Bounded tail for the observation layer: cameras scan a window instead
+    /// of cloning an ever-growing session log every few ticks.
+    pub fn recent_events(&self, n: usize) -> Vec<SessionEvent> {
+        let start = self.events.len().saturating_sub(n);
+        self.events[start..].to_vec()
+    }
+
     /// Every fact belonging to one work order, oldest first. The scan runs
     /// backwards and stops at the turn that opened the order, so deriving a
     /// context stays cheap even when the log has tens of thousands of events.

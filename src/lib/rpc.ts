@@ -221,6 +221,8 @@ export function eventLabel(kind: string): string {
     'tool.result': '结果小票',
     'dispatch.decision': '派单决策',
     'worker.assigned': '工人调岗',
+    'camera.capture': '摄像头抓拍',
+    'camera.blindspot': '发现盲区',
     'external.event': '外部上报',
     'session.event': '会话事件',
   }
@@ -234,6 +236,9 @@ export function eventDetail(event: SessionEvent): string {
   const label = typeof p.label === 'string' ? p.label : ''
   const receipt = typeof p.receipt === 'string' ? p.receipt : ''
   const blocked = p.blocked === true ? '闸口拦下' : ''
-  const parts = [label, note, delta, blocked, receipt].filter(Boolean)
+  const code = typeof p.code === 'string' ? p.code : ''
+  const subject = typeof p.subject === 'string' ? p.subject : ''
+  const coverage = typeof p.coverage === 'number' ? `覆盖率 ${Math.round(p.coverage * 100)}%` : ''
+  const parts = [label, code, subject, note, delta, blocked, receipt, coverage].filter(Boolean)
   return parts.join(' · ').slice(0, 90)
 }

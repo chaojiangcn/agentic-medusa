@@ -9,6 +9,7 @@
 //! tool approvals, here used for the boss's inspection gate.
 
 use crate::config::ConfigStore;
+use crate::observe::{CAMERAS, STRUCTURAL_BLINDSPOTS};
 use crate::protocol::*;
 use crate::session::SessionStore;
 use crate::workshop::{emit, initial_snapshot, project};
@@ -105,6 +106,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/config", post(config_write))
         .route("/api/tools", get(tools_read))
         .route("/api/context", get(context_read))
+        .route("/api/observations", get(observations_read))
         .route("/api/events", post(ingest))
         .route("/api/control", post(control))
         .route("/api/stream", get(sse))
@@ -162,7 +164,7 @@ async fn protocol_info() -> impl IntoResponse {
             "thread/fork", "thread/read", "turn/start", "turn/interrupt",
             "control", "config/read", "config/write", "event/ingest",
             "session/replay", "session/context", "approval/respond",
-            "tools/list", "tools/call"
+            "tools/list", "tools/call", "camera/list", "camera/capture"
         ],
         "notifications": [
             "thread/started", "turn/started", "turn/completed", "turn/interrupted",
@@ -170,10 +172,12 @@ async fn protocol_info() -> impl IntoResponse {
             "boss/patrol", "boss/inspection", "boss/intervention",
             "dispatch/decision", "worker/assigned",
             "tool/call", "tool/result",
+            "camera/capture", "camera/blindspot",
             "workshop/snapshot", "system/control", "config/updated", "session/event"
         ],
         "serverRequests": ["approval/request"],
         "sources": ["append-only JSONL session log"],
+        "roles": { "boss": "decides + intervenes", "camera": "observes only" },
     }))
 }
 
@@ -229,6 +233,14 @@ async fn threads_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
 /// REST view of the equipment ledger (a convenience shim over tools/list).
 async fn tools_read(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match dispatch(&state, "tools/list", json!({})).await {
+        Ok(value) => Json(value),
+        Err((_, message)) => Json(json!({ "error": message })),
+    }
+}
+
+/// REST view of the observation ledger (a shim over camera/list).
+async fn observations_read(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match dispatch(&state, "camera/list", json!({})).await {
         Ok(value) => Json(value),
         Err((_, message)) => Json(json!({ "error": message })),
     }
@@ -620,7 +632,9 @@ async fn dispatch(
                     "tools": true,
                     "toolCall": true,
                     "dispatch": true,
-                    "context": "deriveMessages"
+                    "context": "deriveMessages",
+                    "observe": true,
+                    "camera": "readOnly"
                 },
                 "configHome": state.config.home.display().to_string(),
                 "config": state.config.view(),
@@ -974,6 +988,74 @@ async fn dispatch(
             .await
             .map_err(|e| (ERR_INVALID_PARAMS, e))?;
             Ok(serde_json::to_value(ctx).unwrap())
+        }
+
+        // Cameras are read-only observers. `camera/list` describes the role
+        // and the blind spots it can see but never fix.
+        "camera/list" => {
+            let snap = state.snapshot.lock().await.clone();
+            let cameras: Vec<Value> = CAMERAS
+                .iter()
+                .map(|c| {
+                    json!({
+                        "id": c.id, "label": c.label, "focus": c.focus,
+                        "position": { "x": c.x, "y": c.y, "z": c.z }
+                    })
+                })
+                .collect();
+            let structural: Vec<Value> = STRUCTURAL_BLINDSPOTS
+                .iter()
+                .map(|(code, note)| json!({ "code": code, "note": note }))
+                .collect();
+            Ok(json!({
+                "cameras": cameras,
+                "views": snap.cameras,
+                "observations": snap.observations,
+                "structuralBlindspots": structural,
+                "observability": snap.metrics.observability,
+                "counts": {
+                    "captures": snap.metrics.captures,
+                    "blindspots": snap.metrics.blindspots
+                },
+                "policy": {
+                    "readOnly": true,
+                    "canDecide": false,
+                    "canIntervene": false,
+                    "writesFacts": ["camera.capture", "camera.blindspot"],
+                    "note": "摄像头只往 append-only 日志写观测事实，不派单、不介入、不改任何工单状态。"
+                }
+            }))
+        }
+        "camera/capture" => {
+            let requested = s("cameraId");
+            let cam = CAMERAS
+                .iter()
+                .find(|c| c.id == requested)
+                .unwrap_or(&CAMERAS[0]);
+            let thread = state.active_thread.lock().await.clone();
+            let events = state.store.lock().await.recent_events(400);
+            let mode = state.config.get().mode;
+            let tick = state.snapshot.lock().await.tick;
+            let cap = crate::observe::capture(&events, tick, &mode);
+            let mut seqs = Vec::new();
+            for ev in crate::workshop::observation_events(&thread, cam, &cap, tick) {
+                let frame = emit(state, ev)
+                    .await
+                    .map_err(|e| (ERR_INVALID_PARAMS, e.to_string()))?;
+                seqs.push(frame.event.seq);
+            }
+            Ok(json!({
+                "cameraId": cam.id,
+                "seen": cap.seen,
+                "checks": cap.checks,
+                "gaps": cap.gaps,
+                "coverage": cap.coverage,
+                "blindspots": cap.blindspots.len(),
+                "codes": cap.blindspots.iter().map(|b| b.code).collect::<Vec<_>>(),
+                "seqs": seqs,
+                "readOnly": true,
+                "note": cap.note
+            }))
         }
 
         "event/ingest" => {

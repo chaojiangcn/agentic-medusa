@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import { selectSnapshot, useMedusaStore } from '@/lib/store'
 import { eventDetail, eventLabel } from '@/lib/rpc'
-import type { DerivedContext } from '@/lib/contract'
+import type { CameraList, DerivedContext } from '@/lib/contract'
 
 const STATUS_LABEL: Record<string, string> = {
   busy: '忙碌',
@@ -32,13 +32,16 @@ export function UI() {
     frames, cursor, playing, speed, connected, error, selectedWorkerId,
     approval, config, threads, activeThread, protocolVersion, configHome,
   } = store
-  const [tab, setTab] = useState<'workers' | 'tools' | 'dispatch' | 'config' | 'protocol'>('workers')
+  const [tab, setTab] = useState<'workers' | 'tools' | 'dispatch' | 'observe' | 'config' | 'protocol'>('workers')
   const [busy, setBusy] = useState(false)
   const [toolResult, setToolResult] = useState<{ blocked: boolean; text: string } | null>(null)
   const [context, setContext] = useState<DerivedContext | null>(null)
   const [ctxTask, setCtxTask] = useState<string | null>(null)
   const [ctxLoading, setCtxLoading] = useState(false)
   const [requestOpen, setRequestOpen] = useState(false)
+  const [cameraList, setCameraList] = useState<CameraList | null>(null)
+  const [obsBusy, setObsBusy] = useState(false)
+  const [obsResult, setObsResult] = useState<string | null>(null)
 
   const maxCursor = Math.max(0, frames.length - 1)
   const recent = frames
@@ -100,6 +103,33 @@ export function UI() {
     }
   }
 
+  const loadCameras = async () => {
+    try {
+      const res = await store.call<CameraList>('camera/list', {})
+      setCameraList(res)
+    } catch {
+      setCameraList(null)
+    }
+  }
+
+  // A manual capture is still read-only: it only appends observation facts.
+  const captureNow = async (cameraId?: string) => {
+    setObsBusy(true)
+    try {
+      const res = await store.call<{
+        cameraId: string; coverage: number; blindspots: number; seen: number
+      }>('camera/capture', cameraId ? { cameraId } : {})
+      setObsResult(
+        `${res.cameraId} · 看见 ${res.seen} 条关键事实 · 覆盖率 ${Math.round(res.coverage * 100)}% · 盲区 ${res.blindspots} 处`,
+      )
+      await loadCameras()
+    } catch (e) {
+      setObsResult(e instanceof Error ? e.message : '抓拍失败')
+    } finally {
+      setObsBusy(false)
+    }
+  }
+
   useEffect(() => {
     if (tab !== 'dispatch') return
     let cancelled = false
@@ -121,6 +151,18 @@ export function UI() {
       cancelled = true
     }
   }, [tab])
+
+  useEffect(() => {
+    // Re-fetch when the tab opens *and* whenever the RPC link comes back:
+    // a reload can land on this tab before the handshake finishes.
+    if (tab !== 'observe' || !connected) return
+    let cancelled = false
+    const call = useMedusaStore.getState().call
+    call<CameraList>('camera/list', {})
+      .then((res) => { if (!cancelled) setCameraList(res) })
+      .catch(() => { if (!cancelled) setCameraList(null) })
+    return () => { cancelled = true }
+  }, [tab, connected])
 
   return (
     <div className="overlay">
@@ -145,6 +187,7 @@ export function UI() {
           <button className={tab === 'workers' ? 'active' : ''} onClick={() => setTab('workers')}>车间</button>
           <button className={tab === 'tools' ? 'active' : ''} onClick={() => setTab('tools')}>设备</button>
           <button className={tab === 'dispatch' ? 'active' : ''} onClick={() => setTab('dispatch')}>派单</button>
+          <button className={tab === 'observe' ? 'active' : ''} onClick={() => setTab('observe')}>观测</button>
           <button className={tab === 'config' ? 'active' : ''} onClick={() => setTab('config')}>配置</button>
           <button className={tab === 'protocol' ? 'active' : ''} onClick={() => setTab('protocol')}>协议</button>
         </div>
@@ -316,6 +359,87 @@ export function UI() {
           </>
         )}
 
+        {tab === 'observe' && (
+          <>
+            <section>
+              <h3>摄像头 · 只读观测角色</h3>
+              <p className="note">
+                摄像头不派单、不介入、不改任何工单状态。它只往 append-only 日志写两类事实：
+                <code>camera.capture</code>（看到了什么）和 <code>camera.blindspot</code>（哪里是盲区）。
+                观测事实不带工单归属，所以永远不会混进模型上下文。
+              </p>
+              <div className="policy-strip">
+                <span className="perm-badge safe">只读</span>
+                <span>不决策</span><span>不干预</span><span>不改状态</span>
+              </div>
+              <div className="btn-row">
+                <button disabled={obsBusy} onClick={() => void captureNow()}>手动抓拍</button>
+                <button disabled={obsBusy} onClick={() => void loadCameras()}>刷新台账</button>
+              </div>
+              {obsResult && <p className="note">{obsResult}</p>}
+            </section>
+
+            <section>
+              <h3>可观测性</h3>
+              <div className="coverage-bar">
+                <div style={{ width: `${Math.round((snapshot?.metrics.observability ?? 1) * 100)}%` }} />
+              </div>
+              <div className="kv"><span>覆盖率 · 当前窗口</span><code>{Math.round((snapshot?.metrics.observability ?? 1) * 100)}%</code></div>
+              <div className="kv"><span>抓拍 / 盲区累计</span><code>{snapshot?.metrics.captures ?? 0} / {snapshot?.metrics.blindspots ?? 0}</code></div>
+              <p className="note">
+                覆盖率 = 日志里能找到完整闭环的关键事实占比：开工→完成、设备调用→结果小票、投料→派单决策。
+              </p>
+            </section>
+
+            <section>
+              <h3>机位 · {snapshot?.cameras.length ?? 0}</h3>
+              {snapshot?.cameras.length === 0 && <p className="empty">连接后读取机位…</p>}
+              {(snapshot?.cameras ?? []).map((cam) => (
+                <button key={cam.id} className="camera-row" onClick={() => void captureNow(cam.id)}>
+                  <div className="camera-row-head">
+                    <i className={'rec-dot ' + cam.status} />
+                    <b>{cam.label}</b>
+                    <span>{cam.status === 'alert' ? '发现盲区' : '录制中'}</span>
+                  </div>
+                  <small>{cam.focus} · 抓拍 {cam.captures} · 盲区 {cam.blindspots}</small>
+                  <small className="cam-note">{cam.lastNote || '尚无记录'}</small>
+                </button>
+              ))}
+            </section>
+
+            <section>
+              <h3>最近观测</h3>
+              {(snapshot?.observations ?? []).length === 0 && <p className="empty">等下一次抓拍…</p>}
+              {(snapshot?.observations ?? []).slice().reverse().map((o) => (
+                <div className={'obs-row ' + o.kind} key={o.seq}>
+                  <div className="obs-head">
+                    <span className={'obs-kind ' + o.kind}>{o.kind === 'blindspot' ? '盲区' : '抓拍'}</span>
+                    <b>{o.code === 'clear' ? o.subject : o.code}</b>
+                    <small>#{o.seq}</small>
+                  </div>
+                  <p>{o.note}</p>
+                  <small>
+                    {o.cameraLabel} · tick {o.tick}
+                    {o.evidenceSeqs.length ? ' · 证据 seq ' + o.evidenceSeqs.slice(0, 4).join(',') : ''}
+                  </small>
+                </div>
+              ))}
+            </section>
+
+            <section>
+              <h3>结构性盲区（修不了的）</h3>
+              <p className="note">harness 本身的可观测性缺口，摄像头看得见但补不上，只能如实报告。</p>
+              {(cameraList?.structuralBlindspots ?? []).map((b) => (
+                <div className="structural-row" key={b.code}>
+                  <code>{b.code}</code>
+                  <p>{b.note}</p>
+                </div>
+              ))}
+              {!cameraList && <p className="empty">连接后读取…</p>}
+            </section>
+          </>
+        )}
+
         {tab === 'config' && (
           <section>
             <h3>模型配置 · 进程侧</h3>
@@ -386,6 +510,9 @@ export function UI() {
             <div className="metric"><span>设备</span><b>{tools.length}</b></div>
             <div className="metric"><span>设备调用</span><b>{toolCalls}</b></div>
             <div className="metric"><span>派单</span><b>{snapshot?.metrics.dispatched ?? 0}</b></div>
+            <div className="metric"><span>摄像头抓拍</span><b>{snapshot?.metrics.captures ?? 0}</b></div>
+            <div className="metric"><span>盲区累计</span><b>{snapshot?.metrics.blindspots ?? 0}</b></div>
+            <div className="metric"><span>可观测性</span><b>{Math.round((snapshot?.metrics.observability ?? 1) * 100)}%</b></div>
           </div>
         </section>
 

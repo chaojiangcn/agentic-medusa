@@ -5,6 +5,7 @@
 
 use crate::dispatch::{decide, Decision};
 use crate::llm::{complete_messages_blocking, mock_text, LlmClient};
+use crate::observe::{self, CameraSpec, CAMERAS};
 use crate::protocol::*;
 use crate::rpc::{AppState, ApprovalReply};
 use crate::tools::{sample_args, ToolRegistry};
@@ -88,6 +89,18 @@ pub fn initial_snapshot(thread_id: &str) -> Snapshot {
                 ..Default::default()
             })
             .collect(),
+        cameras: CAMERAS
+            .iter()
+            .map(|c| CameraView {
+                id: c.id.into(),
+                label: c.label.into(),
+                focus: c.focus.into(),
+                position: Vec3 { x: c.x, y: c.y, z: c.z },
+                status: "recording".into(),
+                last_note: "待命中，尚未抓拍".into(),
+                ..Default::default()
+            })
+            .collect(),
         last_event: None,
         ..Default::default()
     }
@@ -99,6 +112,12 @@ pub fn project(snap: &mut Snapshot, ev: &SessionEvent) {
     let s = |k: &str| p.get(k).and_then(Value::as_str).unwrap_or("").to_string();
     let n = |k: &str| p.get(k).and_then(Value::as_f64).unwrap_or(0.0);
     let u = |k: &str| p.get(k).and_then(Value::as_u64).unwrap_or(0);
+    let seqs = |k: &str| -> Vec<u64> {
+        p.get(k)
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_u64).collect())
+            .unwrap_or_default()
+    };
 
     snap.last_event = Some(ev.clone());
     snap.seq = ev.seq;
@@ -275,6 +294,63 @@ pub fn project(snap: &mut Snapshot, ev: &SessionEvent) {
                 w.stage_id = sid;
             }
         }
+        // Observation facts only touch the camera ledger. A camera must never
+        // change a task, worker, device or the boss — read-only by construction.
+        "camera.capture" => {
+            let cid = s("cameraId");
+            let note = s("note");
+            let coverage = n("coverage");
+            if let Some(cam) = snap.cameras.iter_mut().find(|c| c.id == cid) {
+                cam.captures += 1;
+                cam.last_seq = ev.seq;
+                cam.last_note = note.clone();
+                cam.status = if u("blindspots") > 0 {
+                    "alert".into()
+                } else {
+                    "recording".into()
+                };
+            }
+            snap.metrics.captures += 1;
+            snap.metrics.observability = coverage;
+            snap.observations.push(ObservationRecord {
+                seq: ev.seq,
+                tick: u("tick"),
+                camera_id: cid.clone(),
+                camera_label: s("cameraLabel"),
+                kind: "capture".into(),
+                code: "clear".into(),
+                subject: s("focus"),
+                note,
+                coverage,
+                evidence_seqs: seqs("evidenceSeqs"),
+            });
+            trim_observations(snap);
+        }
+        "camera.blindspot" => {
+            let cid = s("cameraId");
+            let note = s("note");
+            if let Some(cam) = snap.cameras.iter_mut().find(|c| c.id == cid) {
+                cam.blindspots += 1;
+                cam.last_seq = ev.seq;
+                cam.last_note = note.clone();
+                cam.status = "alert".into();
+            }
+            snap.metrics.blindspots += 1;
+            snap.metrics.observability = n("coverage");
+            snap.observations.push(ObservationRecord {
+                seq: ev.seq,
+                tick: u("tick"),
+                camera_id: cid.clone(),
+                camera_label: s("cameraLabel"),
+                kind: "blindspot".into(),
+                code: s("code"),
+                subject: s("subject"),
+                note,
+                coverage: n("coverage"),
+                evidence_seqs: seqs("evidenceSeqs"),
+            });
+            trim_observations(snap);
+        }
         "config.updated" => {
             let model = s("model");
             for w in &mut snap.workers {
@@ -284,6 +360,53 @@ pub fn project(snap: &mut Snapshot, ev: &SessionEvent) {
         _ => {}
     }
     recompute(snap);
+}
+
+fn trim_observations(snap: &mut Snapshot) {
+    const MAX: usize = 14;
+    if snap.observations.len() > MAX {
+        let excess = snap.observations.len() - MAX;
+        snap.observations.drain(..excess);
+    }
+}
+
+/// Turn one read-only observation into append-only facts. Note what is *not*
+/// set: no task, worker, item or stage. Camera facts must not enter any work
+/// order's derived context or change its state.
+pub fn observation_events(
+    thread_id: &str,
+    cam: &CameraSpec,
+    cap: &observe::Capture,
+    tick: u64,
+) -> Vec<SessionEvent> {
+    let mut out = vec![SessionEvent::new(
+        0,
+        thread_id,
+        "camera.capture",
+        "camera",
+        json!({
+            "cameraId": cam.id, "cameraLabel": cam.label, "focus": cam.focus,
+            "seen": cap.seen, "checks": cap.checks, "gaps": cap.gaps,
+            "coverage": cap.coverage, "blindspots": cap.blindspots.len(),
+            "evidenceSeqs": cap.evidence, "note": cap.note,
+            "readOnly": true, "tick": tick
+        }),
+    )];
+    for b in &cap.blindspots {
+        out.push(SessionEvent::new(
+            0,
+            thread_id,
+            "camera.blindspot",
+            "camera",
+            json!({
+                "cameraId": cam.id, "cameraLabel": cam.label,
+                "code": b.code, "subject": b.subject, "note": b.note,
+                "evidenceSeqs": b.evidence_seqs, "coverage": cap.coverage,
+                "readOnly": true, "tick": tick
+            }),
+        ));
+    }
+    out
 }
 
 fn apply_control(snap: &mut Snapshot, p: &Value) {
@@ -649,6 +772,8 @@ fn ui_method(kind: &str) -> &'static str {
         "tool.result" => "tool/result",
         "dispatch.decision" => "dispatch/decision",
         "worker.assigned" => "worker/assigned",
+        "camera.capture" => "camera/capture",
+        "camera.blindspot" => "camera/blindspot",
         _ => "session/event",
     }
 }
@@ -730,6 +855,22 @@ pub async fn run_driver(state: Arc<AppState>) {
                 .await;
             } else if let Err(e) = emit(&state, ev).await {
                 eprintln!("emit failed: {e}");
+            }
+        }
+
+        // Cameras are read-only: they append observation facts and nothing
+        // else. Rotate through fixed viewpoints so every station gets covered,
+        // and record the gaps that the operator (and the model) cannot see.
+        if tick % 6 == 0 {
+            let cam = &CAMERAS[(tick as usize / 6) % CAMERAS.len()];
+            let events = state.store.lock().await.recent_events(400);
+            let mode = state.config.get().mode;
+            let thread_id = state.active_thread.lock().await.clone();
+            let cap = observe::capture(&events, tick, &mode);
+            for ev in observation_events(&thread_id, cam, &cap, tick) {
+                if let Err(e) = emit(&state, ev).await {
+                    eprintln!("camera emit failed: {e}");
+                }
             }
         }
 

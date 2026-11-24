@@ -284,6 +284,45 @@ pub struct DispatchRecord {
 }
 
 // ---------------------------------------------------------------------------
+// Observation — the camera is a read-only role, never a decision-maker.
+// ---------------------------------------------------------------------------
+
+/// One fixed viewpoint's ledger. Counters are projected from `camera.*` facts.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraView {
+    pub id: String,
+    pub label: String,
+    pub focus: String,
+    pub position: Vec3,
+    pub captures: u32,
+    pub blindspots: u32,
+    pub last_seq: u64,
+    pub last_note: String,
+    /// "recording" | "alert" — an alert is a *report*, not an intervention.
+    pub status: String,
+}
+
+/// One logged observation. `evidence_seqs` point at the facts that were (or
+/// were not) visible, so the audit trail stays inside the log.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservationRecord {
+    pub seq: u64,
+    pub tick: u64,
+    pub camera_id: String,
+    pub camera_label: String,
+    /// "capture" | "blindspot"
+    pub kind: String,
+    /// Blind-spot code; "clear" for a plain capture.
+    pub code: String,
+    pub subject: String,
+    pub note: String,
+    pub coverage: f64,
+    pub evidence_seqs: Vec<u64>,
+}
+
+// ---------------------------------------------------------------------------
 // Derived context — the message array the model would actually receive.
 // ---------------------------------------------------------------------------
 
@@ -393,6 +432,11 @@ pub struct Metrics {
     pub llm_calls: u32,
     /// How many assignments the dispatcher has made this shift.
     pub dispatched: u32,
+    /// Observation is read-only: these counters never feed a decision.
+    pub captures: u32,
+    pub blindspots: u32,
+    /// Fraction of key facts whose counterpart is present in the log.
+    pub observability: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -416,6 +460,10 @@ pub struct Snapshot {
     pub tools: Vec<ToolView>,
     /// Recent dispatcher decisions, projected from dispatch.decision facts.
     pub dispatch: Vec<DispatchRecord>,
+    /// Fixed cameras and their observation ledger (read-only role).
+    pub cameras: Vec<CameraView>,
+    /// Most recent observation facts, newest last.
+    pub observations: Vec<ObservationRecord>,
     /// Most recent session event, for the event-stream panel.
     pub last_event: Option<SessionEvent>,
 }

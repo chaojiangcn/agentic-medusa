@@ -139,6 +139,58 @@ export interface DispatchRecord {
 }
 
 // ---------------------------------------------------------------------------
+// Observation — the camera is a read-only role, never a decision-maker
+// ---------------------------------------------------------------------------
+
+export interface CameraView {
+  id: string
+  label: string
+  focus: string
+  position: Vec3
+  captures: number
+  blindspots: number
+  lastSeq: number
+  lastNote: string
+  /** 'recording' | 'alert' — an alert is a report, not an intervention. */
+  status: string
+}
+
+export interface ObservationRecord {
+  seq: number
+  tick: number
+  cameraId: string
+  cameraLabel: string
+  kind: 'capture' | 'blindspot' | string
+  code: string
+  subject: string
+  note: string
+  coverage: number
+  /** Log positions that were (or were not) visible. */
+  evidenceSeqs: number[]
+}
+
+export interface StructuralBlindspot {
+  code: string
+  note: string
+}
+
+export interface CameraList {
+  cameras: { id: string; label: string; focus: string; position: Vec3 }[]
+  views: CameraView[]
+  observations: ObservationRecord[]
+  structuralBlindspots: StructuralBlindspot[]
+  observability: number
+  counts: { captures: number; blindspots: number }
+  policy: {
+    readOnly: boolean
+    canDecide: boolean
+    canIntervene: boolean
+    writesFacts: string[]
+    note: string
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Derived context — what the model actually receives (from the log)
 // ---------------------------------------------------------------------------
 
@@ -223,6 +275,10 @@ export interface Metrics {
   llmCalls: number
   /** Assignments made by the dispatcher this shift. */
   dispatched: number
+  /** Observation is read-only: these never feed a decision. */
+  captures: number
+  blindspots: number
+  observability: number
 }
 
 export interface Snapshot {
@@ -243,6 +299,10 @@ export interface Snapshot {
   tools: ToolView[]
   /** Recent dispatcher decisions, projected from dispatch.decision facts. */
   dispatch: DispatchRecord[]
+  /** Fixed cameras and their observation ledger. */
+  cameras: CameraView[]
+  /** Recent observation facts, newest last. */
+  observations: ObservationRecord[]
   lastEvent: SessionEvent | null
 }
 
