@@ -63,10 +63,6 @@ pub const CAMERAS: [CameraSpec; 3] = [
 /// don't come and go with the shift — they are properties of the harness.
 pub const STRUCTURAL_BLINDSPOTS: &[(&str, &str)] = &[
     (
-        "model-request",
-        "mock 模式下没有「模型实际收到的请求 / 原始响应」事实，日志里只有派生依据。",
-    ),
-    (
         "tool-timing",
         "设备小票只记结果与耗时，没有失败重试、部分输出或副作用的记录。",
     ),
@@ -92,6 +88,7 @@ fn is_noise(kind: &str) -> bool {
             | "run.started"
             | "thread.started"
             | "thread.resumed"
+            | "agent.iteration"
             | "camera.capture"
             | "camera.blindspot"
     )
@@ -127,9 +124,9 @@ fn str_field(ev: &SessionEvent, key: &str) -> String {
 /// Look at the tail of the log and report what is visible and what is missing.
 ///
 /// Pure function: no state, no I/O, no side effects. Callers decide whether to
-/// write the resulting facts. `mode` is used for the one structural gap a
-/// camera can freshly discover on its very first capture.
-pub fn capture(events: &[SessionEvent], tick: u64, mode: &str) -> Capture {
+/// write the resulting facts. `mode` is kept for callers that want to label a
+/// capture; the checks themselves no longer depend on it.
+pub fn capture(events: &[SessionEvent], tick: u64, _mode: &str) -> Capture {
     let key: Vec<&SessionEvent> = events.iter().filter(|e| !is_noise(&e.kind)).collect();
     let start = key.len().saturating_sub(72);
     let window = &key[start..];
@@ -255,18 +252,25 @@ pub fn capture(events: &[SessionEvent], tick: u64, mode: &str) -> Capture {
         }
     }
 
-    // The first time a camera opens its eye in mock mode it discovers the
-    // harness's honest structural gap: the model's raw request/response never
-    // entered the log. Report it once as a fact, not on every capture.
-    let first_capture = !events.iter().any(|e| e.kind == "camera.capture");
-    if first_capture && mode == "mock" {
+    // 5. An item closed but no request fact sits beside it: the log shows the
+    //    answer without the question that produced it. This used to be a
+    //    permanent structural gap; now that `model.request` is logged, it is
+    //    a real pair check like the others.
+    let has_model_request = window.iter().any(|e| e.kind == "model.request");
+    if !item_ends.is_empty() && !has_model_request {
         checks += 1;
         gaps += 1;
+        let seq = window
+            .iter()
+            .rev()
+            .find(|e| e.kind == "item.completed")
+            .map(|e| e.seq)
+            .unwrap_or(0);
         blindspots.push(Blindspot {
             code: "model-request-unlogged",
             subject: "model-adapter".into(),
-            note: "mock 模式没有把模型原始请求 / 响应写成事实，只能靠日志派生".into(),
-            evidence_seqs: Vec::new(),
+            note: "有工件闭合，但窗口里没有对应的模型请求事实".into(),
+            evidence_seqs: vec![seq],
         });
     }
 
@@ -331,6 +335,7 @@ mod tests {
             ev(4, "item.completed", Some("i1"), Some("T1")),
             ev(5, "tool.call", Some("t1"), Some("T1")),
             ev(6, "tool.result", Some("t1"), Some("T1")),
+            ev(7, "model.request", None, Some("T1")),
         ];
         let cap = capture(&events, 6, "live");
         assert_eq!(cap.gaps, 0, "every fact has its counterpart");
@@ -372,17 +377,23 @@ mod tests {
     }
 
     #[test]
-    fn first_mock_capture_reports_the_structural_gap() {
-        let cap = capture(&[], 6, "mock");
+    fn an_answer_without_a_request_is_a_blind_spot() {
+        let events = vec![
+            ev(1, "item.started", Some("i1"), Some("T1")),
+            ev(2, "item.completed", Some("i1"), Some("T1")),
+        ];
+        let cap = capture(&events, 6, "mock");
         assert!(cap
             .blindspots
             .iter()
             .any(|b| b.code == "model-request-unlogged"));
-        let later = capture(
-            &[ev(1, "camera.capture", None, None)],
-            12,
-            "mock",
-        );
+
+        let with_request = vec![
+            ev(1, "item.started", Some("i1"), Some("T1")),
+            ev(2, "item.completed", Some("i1"), Some("T1")),
+            ev(3, "model.request", None, Some("T1")),
+        ];
+        let later = capture(&with_request, 12, "mock");
         assert!(!later
             .blindspots
             .iter()

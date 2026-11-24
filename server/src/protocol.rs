@@ -362,6 +362,53 @@ pub struct DerivedContext {
 }
 
 // ---------------------------------------------------------------------------
+// Acceptance — a verdict is a fact, computed from the log.
+// ---------------------------------------------------------------------------
+
+/// One criterion's state. `evidence_seq` points at the fact that decided it.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CriterionView {
+    pub id: String,
+    pub label: String,
+    pub ok: bool,
+    pub note: String,
+    pub evidence_seq: u64,
+}
+
+/// The oracle's answer for one work order. Passing shows the whole ledger,
+/// not just a boolean: "why it passed" is as auditable as "why it failed".
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct VerdictView {
+    pub passed: bool,
+    pub checks: Vec<CriterionView>,
+    pub missing: Vec<String>,
+    pub note: String,
+    pub seq: u64,
+}
+
+/// One model exchange as it was logged. `request` is the exact wire body that
+/// left the process, so the log can prove what the model saw.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCallRecord {
+    pub seq: u64,
+    pub task_id: String,
+    pub stage: String,
+    pub iteration: u32,
+    pub model: String,
+    pub message_count: u32,
+    pub tools: Vec<String>,
+    pub tokens_estimate: u64,
+    pub request: Value,
+    pub response_text: String,
+    pub tool_call_names: Vec<String>,
+    pub latency_ms: u64,
+    pub live: bool,
+}
+
+// ---------------------------------------------------------------------------
 // Workshop projection — derived from the log, never stored as truth.
 // ---------------------------------------------------------------------------
 
@@ -399,14 +446,23 @@ pub struct Worker {
     pub config_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkTask {
     pub id: String,
     pub title: String,
+    /// What this order is for. Set once at turn.started, never inferred later.
+    pub goal: String,
+    pub goal_id: String,
+    /// The criteria that decide completion, with their live state.
+    pub criteria: Vec<CriterionView>,
     pub stage_index: i32,
     pub progress: f64,
     pub status: String,
+    /// How many model exchanges this order has run (agent loop turns).
+    pub iterations: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<VerdictView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -437,6 +493,12 @@ pub struct Metrics {
     pub blindspots: u32,
     /// Fraction of key facts whose counterpart is present in the log.
     pub observability: f64,
+    /// Model exchanges the agent loop has run this shift.
+    pub iterations: u32,
+    /// Work orders whose verdict passed.
+    pub passed: u32,
+    /// Work orders whose verdict failed, or that never reached one.
+    pub rejected: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -464,6 +526,9 @@ pub struct Snapshot {
     pub cameras: Vec<CameraView>,
     /// Most recent observation facts, newest last.
     pub observations: Vec<ObservationRecord>,
+    /// Recent model exchanges, newest last. The request body is logged, not
+    /// reconstructed after the fact.
+    pub model_log: Vec<ModelCallRecord>,
     /// Most recent session event, for the event-stream panel.
     pub last_event: Option<SessionEvent>,
 }

@@ -2,6 +2,7 @@
 //! browser: this is the layer Codex Desktop hides inside its Host. In `mock`
 //! mode nothing outbound happens, so the workshop runs with zero config.
 
+use crate::agent::{AgentReply, ToolCallReq};
 use crate::config::ConfigStore;
 use crate::protocol::ModelProvider;
 use anyhow::{anyhow, Result};
@@ -54,7 +55,7 @@ pub fn complete_messages_blocking(
     messages: &[Value],
     tools: Option<&Value>,
     max_tokens: u64,
-) -> Result<LlmResult> {
+) -> Result<AgentReply> {
     if !client.budget_left(cfg) {
         return Err(anyhow!("预算闸口：本分钟调用次数已达上限"));
     }
@@ -143,57 +144,74 @@ pub fn complete_messages_blocking(
     let value: Value = serde_json::from_slice(&output.stdout)
         .map_err(|e| anyhow!("模型响应解析失败: {} · {}", e, String::from_utf8_lossy(&output.stdout)))?;
 
-    let text = if provider.wire_api == "responses" {
-        extract_responses_text(&value)
+    let (text, tool_calls, finish) = if provider.wire_api == "responses" {
+        (extract_responses_text(&value), Vec::new(), "stop".to_string())
     } else {
         let content = value
             .pointer("/choices/0/message/content")
             .and_then(Value::as_str)
-            .unwrap_or("");
-        if content.trim().is_empty() {
-            // A model that answers with a tool call has no content. Surface the
-            // intent instead of an empty item; executing it is the next layer.
-            extract_tool_intent(&value)
-        } else {
-            content.to_string()
-        }
+            .unwrap_or("")
+            .to_string();
+        // A model that answers with a tool call has no content. Parse the
+        // calls into structured requests instead of flattening them into
+        // prose — the loop has to *execute* them, not narrate them.
+        let calls = parse_tool_calls(&value);
+        let finish = value
+            .pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str)
+            .unwrap_or(if calls.is_empty() { "stop" } else { "tool_calls" })
+            .to_string();
+        (content, calls, finish)
     };
 
     let usage = value.get("usage");
     let tokens = usage
-        .and_then(|u| u.get("total_tokens").or_else(|| u.get("total_tokens")))
+        .and_then(|u| u.get("total_tokens"))
         .and_then(Value::as_u64)
         .unwrap_or_else(|| (text.chars().count() as u64) / 2 + 32);
 
-    Ok(LlmResult {
+    Ok(AgentReply {
         text,
+        tool_calls,
         tokens,
         latency_ms: started.elapsed().as_millis() as u64,
+        finish,
     })
 }
 
-fn extract_tool_intent(v: &Value) -> String {
-    let Some(calls) = v
+/// Read the calls a chat-completions response asked for. Malformed entries
+/// are skipped rather than failing the turn: a missing name is not a reason
+/// to lose the whole reply.
+fn parse_tool_calls(v: &Value) -> Vec<ToolCallReq> {
+    let Some(arr) = v
         .pointer("/choices/0/message/tool_calls")
         .and_then(Value::as_array)
     else {
-        return String::new();
+        return Vec::new();
     };
-    let parts: Vec<String> = calls
-        .iter()
-        .map(|c| {
-            let name = c
-                .pointer("/function/name")
+    arr.iter()
+        .filter_map(|c| {
+            let name = c.pointer("/function/name").and_then(Value::as_str)?;
+            if name.is_empty() {
+                return None;
+            }
+            let id = c
+                .get("id")
                 .and_then(Value::as_str)
-                .unwrap_or("?");
-            let args = c
+                .unwrap_or("")
+                .to_string();
+            let arguments = c
                 .pointer("/function/arguments")
                 .and_then(Value::as_str)
-                .unwrap_or("");
-            format!("[模型请求调用设备] {name}({args})")
+                .unwrap_or("{}")
+                .to_string();
+            Some(ToolCallReq {
+                id: if id.is_empty() { format!("call-{name}") } else { id },
+                name: name.to_string(),
+                arguments,
+            })
         })
-        .collect();
-    parts.join(" ")
+        .collect()
 }
 
 fn extract_responses_text(v: &Value) -> String {
@@ -216,22 +234,4 @@ fn extract_responses_text(v: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string()
-}
-
-pub struct LlmResult {
-    pub text: String,
-    pub tokens: u64,
-    pub latency_ms: u64,
-}
-
-/// Deterministic mock output, used when no key is configured.
-pub fn mock_text(stage: &str, task: &str, seed: u64) -> String {
-    let variants = [
-        format!("已解析「{}」：拆出 3 个关键步骤，按依赖排序后交给下游。", task),
-        format!("检索到相关上下文 5 条，交叉比对完成，置信度 0.{}。", 70 + seed % 29),
-        format!("{} 工位完成一轮推理，结论已写入工件，等待质检。", stage),
-        format!("发现一处口径不一致，已标注并附上原始出处，建议复核。",),
-        format!("汇总前序产出，形成可交付草稿，共 {} 个要点。", 3 + seed % 4),
-    ];
-    variants[(seed as usize) % variants.len()].clone()
 }

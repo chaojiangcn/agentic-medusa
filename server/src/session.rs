@@ -140,14 +140,15 @@ impl SessionStore {
                     }
                 }
             }
-            "turn.completed" | "turn.interrupted" => {
+            "turn.completed" | "turn.failed" | "turn.interrupted" => {
                 if let Some(turn_id) = &ev.turn_id {
                     if let Some(t) = self.turns.get_mut(turn_id) {
-                        t.status = if ev.kind == "turn.completed" {
-                            "completed".into()
-                        } else {
-                            "interrupted".into()
-                        };
+                        t.status = match ev.kind.as_str() {
+                            "turn.completed" => "completed",
+                            "turn.failed" => "failed",
+                            _ => "interrupted",
+                        }
+                        .into();
                     }
                 }
             }

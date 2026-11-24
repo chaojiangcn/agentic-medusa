@@ -251,9 +251,52 @@ export interface Worker {
 export interface WorkTask {
   id: string
   title: string
+  /** What this order is for — declared at turn.started, never inferred. */
+  goal: string
+  goalId: string
+  /** The criteria that decide completion, with their live state. */
+  criteria: CriterionView[]
   stageIndex: number
   progress: number
   status: TaskStatus
+  /** Model exchanges this order has run. */
+  iterations: number
+  verdict: VerdictView | null
+}
+
+/** One acceptance criterion, decided from logged facts. */
+export interface CriterionView {
+  id: string
+  label: string
+  ok: boolean
+  note: string
+  evidenceSeq: number
+}
+
+/** The oracle's ruling. Passing shows the ledger, not just a boolean. */
+export interface VerdictView {
+  passed: boolean
+  checks: CriterionView[]
+  missing: string[]
+  note: string
+  seq: number
+}
+
+/** One model exchange as it was logged — request body included. */
+export interface ModelCallRecord {
+  seq: number
+  taskId: string
+  stage: string
+  iteration: number
+  model: string
+  messageCount: number
+  tools: string[]
+  tokensEstimate: number
+  request: Array<Record<string, unknown>>
+  responseText: string
+  toolCallNames: string[]
+  latencyMs: number
+  live: boolean
 }
 
 export interface Boss {
@@ -279,6 +322,12 @@ export interface Metrics {
   captures: number
   blindspots: number
   observability: number
+  /** Model exchanges the agent loop has run. */
+  iterations: number
+  /** Orders whose verdict passed. */
+  passed: number
+  /** Orders whose verdict failed, or that never reached one. */
+  rejected: number
 }
 
 export interface Snapshot {
@@ -303,6 +352,8 @@ export interface Snapshot {
   cameras: CameraView[]
   /** Recent observation facts, newest last. */
   observations: ObservationRecord[]
+  /** Recent model exchanges — the request body comes from the log. */
+  modelLog: ModelCallRecord[]
   lastEvent: SessionEvent | null
 }
 

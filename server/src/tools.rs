@@ -81,15 +81,6 @@ impl ToolRegistry {
         self.specs.iter().find(|t| t.name == name)
     }
 
-    /// Safe devices at a station. Approval-gated ones are deliberately kept
-    /// out of the driver's automatic tool step.
-    pub fn safe_for_stage(&self, stage: &str) -> Vec<&ToolSpec> {
-        self.specs
-            .iter()
-            .filter(|t| t.stage_id == stage && t.permission == "safe")
-            .collect()
-    }
-
     /// Deterministic, side-effect free execution. Real executors plug in here.
     pub fn execute(&self, name: &str, args: &Value) -> ToolOutcome {
         let arg = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("");

@@ -10,10 +10,12 @@
 //!   MEDUSA_HOME=... medusa-app-server      # config + session log location
 
 mod config;
+mod agent;
 mod context;
 mod dispatch;
 mod llm;
 mod observe;
+mod oracle;
 mod protocol;
 mod rpc;
 mod session;

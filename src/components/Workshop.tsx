@@ -83,12 +83,17 @@ function WorkerFigure({
   )
 }
 
-function TaskCrate({ task, offset }: { task: WorkTask; offset: number }) {
-  // Not `return null`: dropping the group unmounts its drei Html root, which
-  // trips React's sync-unmount guard while the scene is rendering. Hide it.
-  const done = task.status === 'done'
-  const x = -6 + (task.stageIndex + task.progress) * 4
-  const color = task.status === 'failed' ? '#d93f3f' : '#185fa5'
+/// Fixed crate slots on the floor. A constant count means React never has to
+/// unmount a crate's Html label when the order list shifts.
+const CRATE_SLOTS = 10
+
+function TaskCrate({ task, offset }: { task: WorkTask | null; offset: number }) {
+  // The slot is permanent; only its contents change. Dropping the group (or
+  // keying it by task id) unmounts a drei Html root mid-render, which trips
+  // React's sync-unmount guard every time an order leaves the floor.
+  const done = !task || task.status === 'done' || task.status === 'failed'
+  const x = task ? -6 + (task.stageIndex + task.progress) * 4 : -6
+  const color = task?.status === 'failed' ? '#d93f3f' : '#185fa5'
   return (
     <group visible={!done} position={[x, 0.6, 3.2 + offset]}>
       <mesh castShadow>
@@ -96,7 +101,7 @@ function TaskCrate({ task, offset }: { task: WorkTask; offset: number }) {
         <meshStandardMaterial color={color} />
       </mesh>
       <Html center zIndexRange={[5, 0]} distanceFactor={18} position={[0, 0.5, 0]}>
-        <div className="task-tag" style={{ opacity: done ? 0 : 1 }}>{task.id}</div>
+        <div className="task-tag" style={{ opacity: done ? 0 : 1 }}>{task?.id ?? ''}</div>
       </Html>
     </group>
   )
@@ -354,8 +359,12 @@ function Scene() {
       ))}
       {/* Only the newest crates: finished ones stay mounted but hidden, so a
           long shift never grows an unbounded HTML label layer. */}
-      {snapshot.tasks.slice(-10).map((task, index) => (
-        <TaskCrate key={task.id} task={task} offset={((index % 3) - 1) * 0.36} />
+      {Array.from({ length: CRATE_SLOTS }, (_, index) => (
+        <TaskCrate
+          key={index}
+          task={snapshot.tasks[snapshot.tasks.length - CRATE_SLOTS + index] ?? null}
+          offset={((index % 3) - 1) * 0.36}
+        />
       ))}
       <DispatchBoard record={lastDispatch} />
       {(snapshot.cameras ?? []).map((camera) => (

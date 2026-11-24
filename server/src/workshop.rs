@@ -3,14 +3,15 @@
 //! patrol / inspection / approval behaviour. State is a projection of the
 //! append-only session log.
 
+use crate::agent::{self, AgentReply};
 use crate::dispatch::{decide, Decision};
-use crate::llm::{complete_messages_blocking, mock_text, LlmClient};
+use crate::llm::{complete_messages_blocking, LlmClient};
 use crate::observe::{self, CameraSpec, CAMERAS};
+use crate::oracle;
 use crate::protocol::*;
 use crate::rpc::{AppState, ApprovalReply};
-use crate::tools::{sample_args, ToolRegistry};
+use crate::tools::ToolRegistry;
 use serde_json::{json, Value};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -126,11 +127,19 @@ pub fn project(snap: &mut Snapshot, ev: &SessionEvent) {
         "turn.started" => {
             let id = s("taskId");
             let title = s("title");
+            let goal = s("goal");
+            let goal_id = s("goalId");
+            let criteria = parse_criteria(p.get("criteria"));
             // A resumed or forked log can replay `turn.started` for a task
             // that is already on the shop floor; update it in place instead
             // of pushing a duplicate (React keys + 3D instances would double).
             if let Some(task) = snap.tasks.iter_mut().find(|task| task.id == id) {
                 task.title = title;
+                task.goal = goal;
+                task.goal_id = goal_id;
+                task.criteria = criteria;
+                task.verdict = None;
+                task.iterations = 0;
                 task.stage_index = 0;
                 task.progress = 0.0;
                 task.status = "running".into();
@@ -138,9 +147,14 @@ pub fn project(snap: &mut Snapshot, ev: &SessionEvent) {
                 snap.tasks.push(WorkTask {
                     id: id.clone(),
                     title,
+                    goal,
+                    goal_id,
+                    criteria,
                     stage_index: 0,
                     progress: 0.0,
                     status: "running".into(),
+                    iterations: 0,
+                    verdict: None,
                 });
             }
         }
@@ -173,6 +187,23 @@ pub fn project(snap: &mut Snapshot, ev: &SessionEvent) {
                 w.status = "idle".into();
                 w.load = 0.0;
                 w.task_id = None;
+            }
+            // A closed agentMessage is the evidence the conclusion criterion
+            // asks for, so the ledger lights up as the work happens rather
+            // than only at the verdict.
+            let kind = s("kind");
+            if kind.is_empty() || kind == "agentMessage" {
+                if let Some(task) = snap
+                    .tasks
+                    .iter_mut()
+                    .find(|t| Some(&t.id) == ev.task_id.as_ref())
+                {
+                    if let Some(c) = task.criteria.iter_mut().find(|c| c.id == "conclusion") {
+                        c.ok = true;
+                        c.note = "工件闭合，可交给下一环节".into();
+                        c.evidence_seq = ev.seq;
+                    }
+                }
             }
         }
         "task.moved" => {
@@ -256,6 +287,24 @@ pub fn project(snap: &mut Snapshot, ev: &SessionEvent) {
                 t.active = false;
                 t.last_seq = ev.seq;
                 t.last_receipt = s("receipt");
+            }
+            // A receipt is evidence. A blocked device produces none, which is
+            // exactly why a refused shell call must not light up "approved".
+            let ok = p.get("ok").and_then(Value::as_bool).unwrap_or(true);
+            if ok {
+                if let Some(cid) = criterion_for_tool(&name) {
+                    if let Some(task) = snap
+                        .tasks
+                        .iter_mut()
+                        .find(|t| Some(&t.id) == ev.task_id.as_ref())
+                    {
+                        if let Some(c) = task.criteria.iter_mut().find(|c| c.id == cid) {
+                            c.ok = true;
+                            c.note = "有设备小票佐证".into();
+                            c.evidence_seq = ev.seq;
+                        }
+                    }
+                }
             }
         }
         "dispatch.decision" => {
@@ -351,6 +400,108 @@ pub fn project(snap: &mut Snapshot, ev: &SessionEvent) {
             });
             trim_observations(snap);
         }
+        "agent.iteration" => {
+            if let Some(task) = snap
+                .tasks
+                .iter_mut()
+                .find(|t| Some(&t.id) == ev.task_id.as_ref())
+            {
+                task.iterations = u("iteration") as u32;
+            }
+            snap.metrics.iterations += 1;
+        }
+        // The request body is logged before it leaves the process. That is the
+        // difference between "model-visible means logged" as a slogan and as
+        // a property of the log.
+        "model.request" => {
+            let record = ModelCallRecord {
+                seq: ev.seq,
+                // Read the event's own attribution, not the payload: the
+                // payload is the request body and must stay wire-shaped.
+                task_id: ev.task_id.clone().unwrap_or_default(),
+                stage: ev.stage.clone(),
+                iteration: u("iteration") as u32,
+                model: s("model"),
+                message_count: u("messageCount") as u32,
+                tools: p
+                    .get("tools")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                tokens_estimate: u("tokensEstimate"),
+                request: p.get("messages").cloned().unwrap_or(Value::Null),
+                live: p.get("live").and_then(Value::as_bool).unwrap_or(false),
+                ..Default::default()
+            };
+            snap.model_log.push(record);
+            if snap.model_log.len() > 8 {
+                snap.model_log.remove(0);
+            }
+        }
+        "model.response" => {
+            if let Some(last) = snap.model_log.last_mut() {
+                last.response_text = s("text");
+                last.latency_ms = u("latencyMs");
+                last.tool_call_names = p
+                    .get("toolCalls")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|c| c.get("name").and_then(Value::as_str).map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            }
+            snap.metrics.llm_calls += 1;
+        }
+        "verdict" => {
+            let checks: Vec<CriterionView> = p
+                .get("checks")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|c| serde_json::from_value(c.clone()).ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let passed = p.get("passed").and_then(Value::as_bool).unwrap_or(false);
+            let note = s("note");
+            let verdict = VerdictView {
+                passed,
+                checks: checks.clone(),
+                missing: p
+                    .get("missing")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                note: note.clone(),
+                seq: ev.seq,
+            };
+            let task_id = ev.task_id.clone().unwrap_or_default();
+            if let Some(task) = snap.tasks.iter_mut().find(|t| t.id == task_id) {
+                task.criteria = checks;
+                task.verdict = Some(verdict);
+            }
+            if passed {
+                snap.metrics.passed += 1;
+            } else {
+                snap.metrics.rejected += 1;
+            }
+            snap.boss.mode = "inspect".into();
+            snap.boss.note = format!(
+                "判定 {} · {}",
+                task_id,
+                if passed { "通过" } else { "未通过" }
+            );
+        }
         "config.updated" => {
             let model = s("model");
             for w in &mut snap.workers {
@@ -360,6 +511,43 @@ pub fn project(snap: &mut Snapshot, ev: &SessionEvent) {
         _ => {}
     }
     recompute(snap);
+}
+
+/// Which criterion a device's receipt is evidence for. Mirrors the oracle's
+/// mapping so the live ledger and the final verdict cannot disagree.
+fn criterion_for_tool(name: &str) -> Option<&'static str> {
+    match name {
+        "kb.search" | "file.read" => Some("source"),
+        "data.crosscheck" => Some("crosscheck"),
+        "report.render" => Some("delivered"),
+        _ => None,
+    }
+}
+
+/// Read the criteria a turn was opened with. They are declared once, at
+/// turn.started, so a resumed log can restore the goal without guessing.
+fn parse_criteria(v: Option<&Value>) -> Vec<CriterionView> {
+    v.and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|c| {
+                    let id = c.get("id")?.as_str()?.to_string();
+                    let label = c
+                        .get("label")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    Some(CriterionView {
+                        id,
+                        label,
+                        ok: false,
+                        note: "未开始".into(),
+                        evidence_seq: 0,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn trim_observations(snap: &mut Snapshot) {
@@ -592,9 +780,18 @@ pub fn plan_tick(snap: &Snapshot, tick: u64, counter: &mut u64, seed: &mut u64) 
         let task_id = format!("T{:03}", counter);
         let turn_id = format!("turn-{}", crate::session::short_id());
         let title = TASK_TITLES[(*seed as usize) % TASK_TITLES.len()];
+        // The goal is declared up front, not inferred after the fact: the
+        // oracle and the model both read the same criteria list.
+        let goal = oracle::goal_for(title);
+        let criteria: Vec<Value> = goal
+            .criteria
+            .iter()
+            .map(|(id, label)| json!({ "id": id, "label": label }))
+            .collect();
         events.push(
             SessionEvent::new(0, &thread_id, "turn.started", "system", json!({
-                "taskId": task_id, "title": title
+                "taskId": task_id, "title": title,
+                "goal": goal.text, "goalId": goal.id, "criteria": criteria
             }))
             .with_turn(&turn_id)
             .with_task(&task_id),
@@ -642,9 +839,17 @@ pub fn plan_tick(snap: &Snapshot, tick: u64, counter: &mut u64, seed: &mut u64) 
             .map(|w| w.id.clone());
         if progress >= 1.0 {
             if index + 1 >= STAGES.len() as i32 {
+                // Completion belongs to the oracle, not to this tick. If the
+                // order ran out of ticks without a verdict, the harness — not
+                // the model — failed to close it, and the log says so.
+                if task.verdict.is_some() {
+                    continue;
+                }
                 let finisher = holder.clone().unwrap_or_else(|| "w3".to_string());
-                let mut ev = SessionEvent::new(0, &thread_id, "turn.completed", &finisher, json!({
-                    "taskId": task.id, "workerId": finisher
+                let mut ev = SessionEvent::new(0, &thread_id, "turn.failed", &finisher, json!({
+                    "taskId": task.id, "workerId": finisher,
+                    "reason": "verdict-missing",
+                    "note": "工位跑完但没有判定结果"
                 }))
                 .with_task(&task.id)
                 .with_worker(&finisher)
@@ -774,6 +979,11 @@ fn ui_method(kind: &str) -> &'static str {
         "worker.assigned" => "worker/assigned",
         "camera.capture" => "camera/capture",
         "camera.blindspot" => "camera/blindspot",
+        "agent.iteration" => "agent/iteration",
+        "model.request" => "model/request",
+        "model.response" => "model/response",
+        "verdict" => "verdict",
+        "turn.failed" => "turn/failed",
         _ => "session/event",
     }
 }
@@ -826,7 +1036,8 @@ pub async fn run_driver(state: Arc<AppState>) {
         };
 
         for ev in plan.events {
-            // Once a turn starts, stream its item's content as deltas.
+            // Once a turn starts, the agent loop owns the item until it either
+            // concludes or runs out of iterations.
             if ev.kind == "item.started" {
                 let item_id = ev.item_id.clone().unwrap_or_default();
                 let task_id = ev.task_id.clone().unwrap_or_default();
@@ -837,19 +1048,31 @@ pub async fn run_driver(state: Arc<AppState>) {
                     let snap = state.snapshot.lock().await;
                     snap.thread_id.clone()
                 };
+                let (title, criteria_ids) = {
+                    let snap = state.snapshot.lock().await;
+                    match snap.tasks.iter().find(|t| t.id == task_id) {
+                        Some(t) => (
+                            t.title.clone(),
+                            t.criteria.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
+                        ),
+                        None => (String::new(), Vec::new()),
+                    }
+                };
                 if let Err(e) = emit(&state, ev).await {
                     eprintln!("emit failed: {e}");
                     continue;
                 }
-                stream_item(
+                run_agent_loop(
                     &state,
                     &llm,
                     &thread_id,
                     &turn_id,
                     &item_id,
                     &task_id,
+                    &title,
                     &worker_id,
                     &stage,
+                    &criteria_ids,
                     tick,
                 )
                 .await;
@@ -882,110 +1105,221 @@ pub async fn run_driver(state: Arc<AppState>) {
     }
 }
 
+/// The agent loop: derive context -> ask the model -> act -> repeat, until the
+/// model concludes or the iteration budget runs out. Every step is a logged
+/// fact, so replay reproduces the same reasoning path.
 #[allow(clippy::too_many_arguments)]
-async fn stream_item(
+async fn run_agent_loop(
     state: &Arc<AppState>,
     llm: &LlmClient,
     thread_id: &str,
     turn_id: &str,
     item_id: &str,
     task_id: &str,
+    title: &str,
     worker_id: &str,
     stage: &str,
+    criteria: &[String],
     seed: u64,
 ) {
-    let (provider, key, live) = {
-        let cfg = &state.config;
-        (
-            cfg.active_provider(),
-            cfg.api_key(),
-            cfg.is_live(),
-        )
-    };
+    let registry = ToolRegistry::builtin();
+    let cfg = state.config.get();
+    let live = state.config.is_live();
+    let provider = state.config.active_provider();
+    let key = state.config.api_key();
+    // One pass to reach for a device, one to conclude, plus slack for goals
+    // that need evidence from more than one criterion.
+    let max_iters: u32 = (criteria.len() as u32 + 1).clamp(2, 4);
+    let mut conclusion = String::new();
 
-    let text = if live {
-        let Some(p) = provider else { return };
-        let Some(k) = key else { return };
-        let cfg_snapshot = state.config.get();
-        // Rebuild the request from the log instead of hand-writing a prompt:
-        // upstream items, device receipts and the station's SOP are all facts.
-        let context = {
-            let store = state.store.lock().await;
-            let events = store.task_events(task_id);
-            crate::context::derive(&events, task_id, &cfg_snapshot)
-        };
-        let messages: Vec<Value> = context.messages.iter().map(crate::context::wire).collect();
-        let tools = ToolRegistry::builtin().as_model_tools();
-        let max_tokens = cfg_snapshot.max_tokens_per_turn;
-        let p2 = p.clone();
-        let k2 = k.clone();
-        // Own the budget counters so the closure satisfies 'static.
-        let llm2: LlmClient = Clone::clone(llm);
-        match tokio::task::spawn_blocking(move || {
-            // ConfigStore isn't Clone, so re-read from the same home for the
-            // values the blocking call needs.
-            let home = crate::config::resolve_home();
-            let store = crate::config::ConfigStore::load(home).ok();
-            match store {
-                Some(s) => complete_messages_blocking(
-                    &s,
-                    &llm2,
-                    &p2,
-                    &k2,
-                    &messages,
-                    Some(&tools),
-                    max_tokens,
-                ),
-                None => Err(anyhow::anyhow!("配置不可用")),
-            }
-        })
-        .await
-        {
-            Ok(Ok(r)) => {
-                state
-                    .llm_calls
-                    .fetch_add(1, Ordering::Relaxed);
-                format!("[live · {} ms] {}", r.latency_ms, r.text)
-            }
-            Ok(Err(e)) => format!("[模型调用被闸口拦下] {}", e),
-            Err(e) => format!("[模型调用异常] {}", e),
-        }
-    } else {
-        mock_text(stage, task_id, seed)
-    };
-
-    let chunks: Vec<String> = text
-        .chars()
-        .collect::<Vec<char>>()
-        .chunks(14)
-        .map(|c| c.iter().collect())
-        .collect();
-    let per_chunk_tokens = 6u64;
-    for chunk in &chunks {
-        let mut ev = SessionEvent::new(
+    for iteration in 1..=max_iters {
+        let mut iter_ev = SessionEvent::new(
             0,
             thread_id,
-            "item.agentMessage.delta",
+            "agent.iteration",
             worker_id,
-            json!({ "delta": chunk, "tokens": per_chunk_tokens }),
+            json!({
+                "iteration": iteration, "max": max_iters,
+                "note": format!("第 {}/{} 轮推理", iteration, max_iters)
+            }),
         )
         .with_item(item_id)
         .with_task(task_id)
         .with_worker(worker_id)
         .with_stage(stage);
         if !turn_id.is_empty() {
-            ev = ev.with_turn(turn_id);
+            iter_ev = iter_ev.with_turn(turn_id);
         }
-        if let Err(e) = emit(state, ev).await {
-            eprintln!("delta failed: {e}");
+        if let Err(e) = emit(state, iter_ev).await {
+            eprintln!("agent.iteration failed: {e}");
         }
-        if live {
-            tokio::time::sleep(Duration::from_millis(40)).await;
+
+        // What the model sees, rebuilt from the log — including the receipts
+        // of every device the previous iteration started.
+        let (ctx, events) = {
+            let store = state.store.lock().await;
+            let events = store.task_events(task_id);
+            (crate::context::derive(&events, task_id, &cfg), events)
+        };
+        let messages: Vec<Value> = ctx.messages.iter().map(crate::context::wire).collect();
+        let tools = registry.as_model_tools();
+        let tool_names: Vec<String> = registry.list().iter().map(|t| t.name.clone()).collect();
+
+        // The request body becomes a fact before it leaves the process. That
+        // is what makes "model-visible means logged" a property, not a claim.
+        let mut req_ev = SessionEvent::new(
+            0,
+            thread_id,
+            "model.request",
+            worker_id,
+            json!({
+                "iteration": iteration,
+                // Never label a scripted step with a configured model name:
+                // the log must say what actually produced the reply.
+                "model": if !live {
+                    "(scripted)"
+                } else if cfg.model.is_empty() {
+                    "(default)"
+                } else {
+                    cfg.model.as_str()
+                },
+                "messageCount": messages.len(),
+                "messages": messages,
+                "tools": tool_names,
+                "maxTokens": cfg.max_tokens_per_turn,
+                "tokensEstimate": ctx.tokens_estimate,
+                "live": live,
+                "note": format!(
+                    "第 {iteration} 轮请求 · {} 条消息 · {} 台设备",
+                    ctx.messages.len(),
+                    tool_names.len()
+                )
+            }),
+        )
+        .with_item(item_id)
+        .with_task(task_id)
+        .with_worker(worker_id)
+        .with_stage(stage);
+        if !turn_id.is_empty() {
+            req_ev = req_ev.with_turn(turn_id);
         }
+        if let Err(e) = emit(state, req_ev).await {
+            eprintln!("model.request failed: {e}");
+        }
+
+        let reply: AgentReply = if live {
+            match (provider.clone(), key.clone()) {
+                (Some(p), Some(k)) => {
+                    let messages2 = messages.clone();
+                    let tools2 = tools.clone();
+                    let max_tokens = cfg.max_tokens_per_turn;
+                    let llm2: LlmClient = Clone::clone(llm);
+                    let outcome = tokio::task::spawn_blocking(move || {
+                        let home = crate::config::resolve_home();
+                        match crate::config::ConfigStore::load(home).ok() {
+                            Some(s) => complete_messages_blocking(
+                                &s,
+                                &llm2,
+                                &p,
+                                &k,
+                                &messages2,
+                                Some(&tools2),
+                                max_tokens,
+                            ),
+                            None => Err(anyhow::anyhow!("配置不可用")),
+                        }
+                    })
+                    .await;
+                    match outcome {
+                        Ok(Ok(r)) => r,
+                        Ok(Err(e)) => {
+                            log_model_error(
+                                state, thread_id, turn_id, item_id, task_id, worker_id, stage,
+                                iteration, &e.to_string(),
+                            )
+                            .await;
+                            break;
+                        }
+                        Err(e) => {
+                            log_model_error(
+                                state, thread_id, turn_id, item_id, task_id, worker_id, stage,
+                                iteration, &e.to_string(),
+                            )
+                            .await;
+                            break;
+                        }
+                    }
+                }
+                _ => break,
+            }
+        } else {
+            let satisfied = satisfied_criteria(&events);
+            agent::scripted_step(
+                stage,
+                title,
+                task_id,
+                criteria,
+                &satisfied,
+                iteration,
+                seed.wrapping_add(iteration as u64),
+            )
+        };
+
+        let mut resp_ev = SessionEvent::new(
+            0,
+            thread_id,
+            "model.response",
+            worker_id,
+            json!({
+                "iteration": iteration,
+                "text": reply.text,
+                "toolCalls": reply.tool_calls.iter().map(|c| json!({
+                    "id": c.id, "name": c.name, "arguments": c.arguments
+                })).collect::<Vec<_>>(),
+                "tokens": reply.tokens,
+                "latencyMs": reply.latency_ms,
+                "finish": reply.finish
+            }),
+        )
+        .with_item(item_id)
+        .with_task(task_id)
+        .with_worker(worker_id)
+        .with_stage(stage);
+        if !turn_id.is_empty() {
+            resp_ev = resp_ev.with_turn(turn_id);
+        }
+        if let Err(e) = emit(state, resp_ev).await {
+            eprintln!("model.response failed: {e}");
+        }
+
+        // Act, then loop: the receipts re-enter the context on the next pass.
+        if !reply.tool_calls.is_empty() {
+            for call in &reply.tool_calls {
+                run_device(state, thread_id, turn_id, task_id, worker_id, stage, call).await;
+            }
+            continue;
+        }
+
+        conclusion = reply.text;
+        break;
     }
-    let mut done = SessionEvent::new(0, thread_id, "item.completed", worker_id, json!({
-        "kind": "agentMessage", "tokens": 0
-    }))
+
+    if conclusion.trim().is_empty() {
+        conclusion = format!("{task_id} 在 {stage} 工位未产出结论（轮次或调用失败）。");
+    }
+
+    stream_deltas(
+        state, thread_id, turn_id, item_id, task_id, worker_id, stage, &conclusion,
+    )
+    .await;
+
+    let mut done = SessionEvent::new(
+        0,
+        thread_id,
+        "item.completed",
+        worker_id,
+        json!({ "kind": "agentMessage", "tokens": 0 }),
+    )
     .with_item(item_id)
     .with_task(task_id)
     .with_worker(worker_id)
@@ -997,65 +1331,246 @@ async fn stream_item(
         eprintln!("item.completed failed: {e}");
     }
 
-    // One step = one model request plus the tool calls that follow it. In
-    // mock mode the driver picks a safe device at this station, writes
-    // tool.call, executes locally, then writes tool.result. Both are facts
-    // in the append-only log, so replay shows the same receipts.
-    let registry = ToolRegistry::builtin();
-    let candidates = registry.safe_for_stage(stage);
-    if !candidates.is_empty() && (seed + worker_id.len() as u64) % 3 != 0 {
-        let tool = candidates[(seed as usize) % candidates.len()];
-        let name = tool.name.clone();
-        let label = tool.label.clone();
-        let args = sample_args(&name, task_id);
-        let tool_item_id = format!("tool-{}-{}", task_id, crate::session::short_id());
-        let mut call = SessionEvent::new(
+    // Only the last station closes the order, and only the oracle decides.
+    // A model that says "done" is a proposal; the verdict is the ruling.
+    if stage == STAGES[STAGES.len() - 1].0 {
+        let events = {
+            let store = state.store.lock().await;
+            store.task_events(task_id)
+        };
+        let goal = oracle::goal_for(title);
+        let verdict = oracle::judge(&events, &goal);
+        let mut v_ev = SessionEvent::new(
             0,
             thread_id,
-            "tool.call",
-            worker_id,
+            "verdict",
+            "oracle",
             json!({
-                "toolName": name.clone(), "label": label.clone(), "args": args.clone(),
-                "permission": tool.permission, "stageId": stage,
-                "kind": "toolCall"
+                "taskId": task_id,
+                "passed": verdict.passed,
+                "checks": verdict.checks,
+                "missing": verdict.missing,
+                "note": verdict.note
             }),
         )
-        .with_item(&tool_item_id)
+        .with_task(task_id)
+        .with_stage(stage);
+        if !turn_id.is_empty() {
+            v_ev = v_ev.with_turn(turn_id);
+        }
+        if let Err(e) = emit(state, v_ev).await {
+            eprintln!("verdict failed: {e}");
+        }
+
+        let mut end = SessionEvent::new(
+            0,
+            thread_id,
+            if verdict.passed { "turn.completed" } else { "turn.failed" },
+            worker_id,
+            json!({
+                "taskId": task_id,
+                "workerId": worker_id,
+                "reason": if verdict.passed { "criteria-met" } else { "criteria-missing" },
+                "note": verdict.note
+            }),
+        )
         .with_task(task_id)
         .with_worker(worker_id)
         .with_stage(stage);
         if !turn_id.is_empty() {
-            call = call.with_turn(turn_id);
+            end = end.with_turn(turn_id);
         }
-        if let Err(e) = emit(state, call).await {
-            eprintln!("tool.call failed: {e}");
-        }
-
-        // Give the projector a visible "device running" beat before the receipt.
-        tokio::time::sleep(Duration::from_millis(120)).await;
-
-        let outcome = registry.execute(&name, &args);
-        let mut result = SessionEvent::new(
-            0,
-            thread_id,
-            "tool.result",
-            worker_id,
-            json!({
-                "toolName": name.clone(), "label": label.clone(), "ok": outcome.ok,
-                "receipt": outcome.receipt, "durationMs": outcome.duration_ms
-            }),
-        )
-        .with_item(&tool_item_id)
-        .with_task(task_id)
-        .with_worker(worker_id)
-        .with_stage(stage);
-        if !turn_id.is_empty() {
-            result = result.with_turn(turn_id);
-        }
-        if let Err(e) = emit(state, result).await {
-            eprintln!("tool.result failed: {e}");
+        if let Err(e) = emit(state, end).await {
+            eprintln!("turn end failed: {e}");
         }
     }
+}
+
+/// Which criteria already have evidence in the log. The scripted policy uses
+/// this so it never asks for the same device twice.
+fn satisfied_criteria(events: &[SessionEvent]) -> Vec<String> {
+    let mut tools: Vec<&str> = Vec::new();
+    for ev in events {
+        if ev.kind == "tool.result" {
+            // A device that was blocked never produced evidence, so it must
+            // not count as satisfying its criterion.
+            let ok = ev
+                .payload
+                .get("ok")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            if !ok {
+                continue;
+            }
+            if let Some(name) = ev.payload.get("toolName").and_then(Value::as_str) {
+                tools.push(name);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if tools.contains(&"kb.search") || tools.contains(&"file.read") {
+        out.push("source".to_string());
+    }
+    if tools.contains(&"data.crosscheck") {
+        out.push("crosscheck".to_string());
+    }
+    if tools.contains(&"report.render") {
+        out.push("delivered".to_string());
+    }
+    if tools.contains(&"shell.exec") {
+        out.push("approved".to_string());
+    }
+    out
+}
+
+/// One device invocation, with the approval seam enforced here rather than
+/// trusted to whoever asked.
+#[allow(clippy::too_many_arguments)]
+async fn run_device(
+    state: &Arc<AppState>,
+    thread_id: &str,
+    turn_id: &str,
+    task_id: &str,
+    worker_id: &str,
+    stage: &str,
+    call: &agent::ToolCallReq,
+) {
+    let registry = ToolRegistry::builtin();
+    let spec = registry.get(&call.name);
+    let label = spec
+        .map(|s| s.label.clone())
+        .unwrap_or_else(|| call.name.clone());
+    let permission = spec
+        .map(|s| s.permission.clone())
+        .unwrap_or_else(|| "unknown".into());
+    let args: Value = serde_json::from_str(&call.arguments).unwrap_or_else(|_| json!({}));
+    let tool_item_id = format!("tool-{}-{}", task_id, crate::session::short_id());
+
+    let mut call_ev = SessionEvent::new(
+        0,
+        thread_id,
+        "tool.call",
+        worker_id,
+        json!({
+            "toolName": call.name, "label": label, "args": args,
+            "permission": permission, "stageId": stage, "kind": "toolCall",
+            "callId": call.id, "byModel": true
+        }),
+    )
+    .with_item(&tool_item_id)
+    .with_task(task_id)
+    .with_worker(worker_id)
+    .with_stage(stage);
+    if !turn_id.is_empty() {
+        call_ev = call_ev.with_turn(turn_id);
+    }
+    if let Err(e) = emit(state, call_ev).await {
+        eprintln!("tool.call failed: {e}");
+    }
+
+    // A visible "device running" beat before the receipt.
+    tokio::time::sleep(Duration::from_millis(90)).await;
+
+    let (ok, receipt, duration_ms) = if spec.is_none() {
+        (false, format!("未知设备 {}，未启动", call.name), 0)
+    } else if permission == "approval" {
+        (false, "需老板签字，设备未启动".to_string(), 0)
+    } else {
+        let o = registry.execute(&call.name, &args);
+        (o.ok, o.receipt, o.duration_ms)
+    };
+
+    let mut result_ev = SessionEvent::new(
+        0,
+        thread_id,
+        "tool.result",
+        worker_id,
+        json!({
+            "toolName": call.name, "label": label, "ok": ok,
+            "receipt": receipt, "durationMs": duration_ms, "callId": call.id
+        }),
+    )
+    .with_item(&tool_item_id)
+    .with_task(task_id)
+    .with_worker(worker_id)
+    .with_stage(stage);
+    if !turn_id.is_empty() {
+        result_ev = result_ev.with_turn(turn_id);
+    }
+    if let Err(e) = emit(state, result_ev).await {
+        eprintln!("tool.result failed: {e}");
+    }
+}
+
+/// Stream the conclusion as deltas so the UI and the derived context see the
+/// same bytes. Replay rebuilds the exact same item.
+#[allow(clippy::too_many_arguments)]
+async fn stream_deltas(
+    state: &Arc<AppState>,
+    thread_id: &str,
+    turn_id: &str,
+    item_id: &str,
+    task_id: &str,
+    worker_id: &str,
+    stage: &str,
+    text: &str,
+) {
+    let chunks: Vec<String> = text
+        .chars()
+        .collect::<Vec<char>>()
+        .chunks(14)
+        .map(|c| c.iter().collect())
+        .collect();
+    for chunk in &chunks {
+        let mut ev = SessionEvent::new(
+            0,
+            thread_id,
+            "item.agentMessage.delta",
+            worker_id,
+            json!({ "delta": chunk, "tokens": 6 }),
+        )
+        .with_item(item_id)
+        .with_task(task_id)
+        .with_worker(worker_id)
+        .with_stage(stage);
+        if !turn_id.is_empty() {
+            ev = ev.with_turn(turn_id);
+        }
+        if let Err(e) = emit(state, ev).await {
+            eprintln!("delta failed: {e}");
+        }
+    }
+}
+
+/// A failed model call is still a fact: the log must show the loop stopped
+/// because the model was unreachable, not because it concluded.
+#[allow(clippy::too_many_arguments)]
+async fn log_model_error(
+    state: &Arc<AppState>,
+    thread_id: &str,
+    turn_id: &str,
+    item_id: &str,
+    task_id: &str,
+    worker_id: &str,
+    stage: &str,
+    iteration: u32,
+    message: &str,
+) {
+    let mut ev = SessionEvent::new(
+        0,
+        thread_id,
+        "model.error",
+        worker_id,
+        json!({ "iteration": iteration, "message": message }),
+    )
+    .with_item(item_id)
+    .with_task(task_id)
+    .with_worker(worker_id)
+    .with_stage(stage);
+    if !turn_id.is_empty() {
+        ev = ev.with_turn(turn_id);
+    }
+    let _ = emit(state, ev).await;
 }
 
 async fn request_approval(state: &Arc<AppState>, plan: ApprovalPlan) -> anyhow::Result<()> {

@@ -107,6 +107,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/tools", get(tools_read))
         .route("/api/context", get(context_read))
         .route("/api/observations", get(observations_read))
+        .route("/api/models", get(models_read))
         .route("/api/events", post(ingest))
         .route("/api/control", post(control))
         .route("/api/stream", get(sse))
@@ -167,8 +168,10 @@ async fn protocol_info() -> impl IntoResponse {
             "tools/list", "tools/call", "camera/list", "camera/capture"
         ],
         "notifications": [
-            "thread/started", "turn/started", "turn/completed", "turn/interrupted",
+            "thread/started", "turn/started", "turn/completed", "turn/failed",
+            "turn/interrupted",
             "item/started", "item/agentMessage/delta", "item/completed",
+            "agent/iteration", "model/request", "model/response", "verdict",
             "boss/patrol", "boss/inspection", "boss/intervention",
             "dispatch/decision", "worker/assigned",
             "tool/call", "tool/result",
@@ -244,6 +247,34 @@ async fn observations_read(State(state): State<Arc<AppState>>) -> impl IntoRespo
         Ok(value) => Json(value),
         Err((_, message)) => Json(json!({ "error": message })),
     }
+}
+
+/// The agent loop's own ledger: what went out, what came back, how it ended.
+/// This is a shim over the snapshot so a `curl` can verify the loop without a
+/// WebSocket client.
+async fn models_read(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let snap = state.snapshot.lock().await;
+    let verdicts: Vec<Value> = snap
+        .tasks
+        .iter()
+        .filter_map(|t| t.verdict.as_ref().map(|v| json!({
+            "taskId": t.id,
+            "passed": v.passed,
+            "missing": v.missing,
+            "note": v.note,
+            "seq": v.seq
+        })))
+        .collect();
+    Json(json!({
+        "modelLog": snap.model_log,
+        "verdicts": verdicts,
+        "metrics": {
+            "iterations": snap.metrics.iterations,
+            "modelCalls": snap.metrics.llm_calls,
+            "passed": snap.metrics.passed,
+            "rejected": snap.metrics.rejected
+        }
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -634,7 +665,11 @@ async fn dispatch(
                     "dispatch": true,
                     "context": "deriveMessages",
                     "observe": true,
-                    "camera": "readOnly"
+                    "camera": "readOnly",
+                    "agentLoop": true,
+                    "agentLoopMaxIterations": 4,
+                    "modelLog": true,
+                    "verdict": "oracle"
                 },
                 "configHome": state.config.home.display().to_string(),
                 "config": state.config.view(),

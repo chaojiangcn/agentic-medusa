@@ -264,7 +264,15 @@ pub fn derive(events: &[SessionEvent], task_id: &str, cfg: &AppConfig) -> Derive
 
     let tokens_estimate = messages.iter().map(|m| estimate(&m.content)).sum();
     let model_request = json!({
-        "model": if cfg.model.is_empty() { "(mock)" } else { cfg.model.as_str() },
+        // The preview must not name a configured model when nothing was
+        // called: that is exactly the confusion this harness exists to remove.
+        "model": if cfg.mode != "live" {
+            "(scripted)".to_string()
+        } else if cfg.model.is_empty() {
+            "(default)".to_string()
+        } else {
+            cfg.model.clone()
+        },
         "messages": messages.iter().map(wire).collect::<Vec<_>>(),
         "tools": registry.as_model_tools(),
         "max_tokens": budget,

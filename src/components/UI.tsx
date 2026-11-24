@@ -55,6 +55,14 @@ export function UI() {
   const tools = snapshot?.tools ?? []
   const toolCalls = tools.reduce((sum, tool) => sum + tool.calls, 0)
   const dispatch = snapshot?.dispatch ?? []
+  const tasks = snapshot?.tasks ?? []
+  // The order the ledger is currently talking about: the one whose context is
+  // open, else the newest one on the floor.
+  const focusTask = tasks.find((t) => t.id === ctxTask) ?? tasks[tasks.length - 1]
+  // The request that actually left the process, straight from the log.
+  const realCall = (snapshot?.modelLog ?? [])
+    .filter((m) => m.taskId === (context?.taskId ?? focusTask?.id))
+    .slice(-1)[0]
   const selected = workers.find((worker) => worker.id === selectedWorkerId) ?? workers[0]
   const stageIndex = snapshot?.stages.findIndex((stage) => stage.id === selected?.stageId) ?? -1
   const nextStage = snapshot?.stages[(stageIndex + 1) % (snapshot?.stages.length || 1)]
@@ -286,6 +294,41 @@ export function UI() {
         {tab === 'dispatch' && (
           <>
             <section>
+              <h3>工单目标与判据</h3>
+              <p className="note">
+                完成不是进度条走满：判据要在日志里找得到证据，判定由 oracle 写成事实。
+                模型说「做完了」只是提议，通过还是驳回都留痕。
+              </p>
+              {!focusTask && <p className="empty">还没有在跑的工单。</p>}
+              {focusTask && (
+                <>
+                  <div className="kv"><span>工单</span><code>{focusTask.id} · {focusTask.title}</code></div>
+                  <div className="kv"><span>目标</span><code>{focusTask.goal || '未声明'}</code></div>
+                  <div className="kv"><span>推理轮次</span><code>{focusTask.iterations} 轮</code></div>
+                  <div className="criteria">
+                    {focusTask.criteria.map((c) => (
+                      <div className={'criterion' + (c.ok ? ' ok' : '')} key={c.id}>
+                        <span className="crit-mark">{c.ok ? '✓' : '·'}</span>
+                        <div>
+                          <b>{c.label}</b>
+                          <small>
+                            {c.note}
+                            {c.evidenceSeq ? ` · seq ${c.evidenceSeq}` : ''}
+                          </small>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  {focusTask.verdict && (
+                    <p className={focusTask.verdict.passed ? 'verdict-line pass' : 'verdict-line fail'}>
+                      判定 · {focusTask.verdict.passed ? '通过' : '未通过'} · {focusTask.verdict.note}
+                    </p>
+                  )}
+                </>
+              )}
+            </section>
+
+            <section>
               <h3>派单台 · 最近决策</h3>
               <p className="note">
                 工单进哪个工位、交给谁，由调度规则按「工位匹配 / 空闲 / 负载 / 阻塞」打分，
@@ -345,16 +388,26 @@ export function UI() {
 
             <section>
               <h3>工单列表</h3>
-              {(snapshot?.turns ?? []).slice(-8).reverse().map((t) => (
-                <button
-                  key={t.id}
-                  className={'thread-row' + (ctxTask === t.taskId ? ' active' : '')}
-                  onClick={() => void loadContext(t.taskId)}
-                >
-                  <b>{t.taskId}</b>
-                  <small>{t.status} · {t.items} items · {t.tokens} tok</small>
-                </button>
-              ))}
+              {(snapshot?.turns ?? []).slice(-8).reverse().map((t) => {
+                const task = tasks.find((x) => x.id === t.taskId)
+                return (
+                  <button
+                    key={t.id}
+                    className={'thread-row' + (ctxTask === t.taskId ? ' active' : '')}
+                    onClick={() => void loadContext(t.taskId)}
+                  >
+                    <b>{t.taskId}</b>
+                    <small>
+                      {t.status} · {task?.iterations ?? 0} 轮 · {t.items} items · {t.tokens} tok
+                    </small>
+                    {task?.verdict && (
+                      <span className={'perm-badge ' + (task.verdict.passed ? 'safe' : 'approval')}>
+                        {task.verdict.passed ? '通过' : '未通过'}
+                      </span>
+                    )}
+                  </button>
+                )
+              })}
             </section>
           </>
         )}
@@ -506,7 +559,9 @@ export function UI() {
             <div className="metric"><span>在岗工人</span><b>{snapshot?.metrics.activeWorkers ?? 0}</b></div>
             <div className="metric"><span>阻塞</span><b>{snapshot?.metrics.blocked ?? 0}</b></div>
             <div className="metric"><span>已完成</span><b>{snapshot?.metrics.completed ?? 0}</b></div>
-            <div className="metric"><span>LLM 调用</span><b>{snapshot?.metrics.llmCalls ?? 0}</b></div>
+            <div className="metric"><span>推理轮次</span><b>{snapshot?.metrics.iterations ?? 0}</b></div>
+            <div className="metric"><span>判定通过</span><b>{snapshot?.metrics.passed ?? 0}</b></div>
+            <div className="metric"><span>判定未过</span><b>{snapshot?.metrics.rejected ?? 0}</b></div>
             <div className="metric"><span>设备</span><b>{tools.length}</b></div>
             <div className="metric"><span>设备调用</span><b>{toolCalls}</b></div>
             <div className="metric"><span>派单</span><b>{snapshot?.metrics.dispatched ?? 0}</b></div>
@@ -565,11 +620,28 @@ export function UI() {
             <div className="request-head">
               <div>
                 <b>模型请求体 · {context.taskId}</b>
-                <small>由会话日志派生，不含 API Key</small>
+                <small>
+                  {realCall
+                    ? `日志原文 @seq ${realCall.seq} · 第 ${realCall.iteration} 轮 · ${realCall.messageCount} 条消息`
+                    : '当前派生预览 · 该工单还没有请求事实'}
+                </small>
               </div>
               <button onClick={() => setRequestOpen(false)}>关闭</button>
             </div>
-            <pre className="request-pre">{JSON.stringify(context.modelRequest, null, 2)}</pre>
+            <pre className="request-pre">
+              {JSON.stringify(
+                realCall
+                  ? { model: realCall.model, messages: realCall.request, tools: realCall.tools }
+                  : context.modelRequest,
+                null,
+                2,
+              )}
+            </pre>
+            <p className="request-foot">
+              {realCall
+                ? `这一份是从 append-only 日志里取回的原样请求（seq ${realCall.seq}），不是前端拼的。`
+                : '这条工单还没有 model.request 事实：可能还没跑到，或来自旧日志。'}
+            </p>
           </div>
         </div>
       )}
