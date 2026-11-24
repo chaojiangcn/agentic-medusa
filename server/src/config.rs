@@ -35,6 +35,7 @@ impl ConfigStore {
                     env_key: "DEEPSEEK_API_KEY".into(),
                     wire_api: "chat".into(),
                 }],
+                auto_demo: false,
                 ..Default::default()
             };
             let text = toml::to_string_pretty(&default)?;
@@ -71,6 +72,7 @@ impl ConfigStore {
             tick_ms: c.tick_ms,
             max_tokens_per_turn: c.max_tokens_per_turn,
             max_calls_per_minute: c.max_calls_per_minute,
+            auto_demo: c.auto_demo,
             has_api_key,
             protocol_version: PROTOCOL_VERSION.into(),
             user_agent: USER_AGENT.into(),
@@ -99,6 +101,9 @@ impl ConfigStore {
         }
         if let Some(v) = patch.get("maxTokensPerTurn").and_then(|v| v.as_u64()) {
             c.max_tokens_per_turn = v.clamp(200, 100_000);
+        }
+        if let Some(v) = patch.get("autoDemo").and_then(|v| v.as_bool()) {
+            c.auto_demo = v;
         }
         if let Some(arr) = patch.get("providers").and_then(|v| v.as_array()) {
             let mut providers = Vec::new();

@@ -195,6 +195,11 @@ export function approvalParams(msg: RpcMessage): ApprovalRequest {
     taskId: String(p.taskId ?? ''),
     turnId: String(p.turnId ?? ''),
     options: Array.isArray(p.options) ? (p.options as string[]) : ['allow', 'deny'],
+    kind: String(p.kind ?? 'patrol'),
+    toolName: String(p.toolName ?? ''),
+    label: String(p.label ?? ''),
+    callId: String(p.callId ?? ''),
+    args: (p.args && typeof p.args === 'object' ? p.args : {}) as Record<string, unknown>,
   }
 }
 
@@ -219,6 +224,8 @@ export function eventLabel(kind: string): string {
     'config.updated': '配置更新',
     'tool.call': '设备启动',
     'tool.result': '结果小票',
+    'approval.granted': '老板签字放行',
+    'approval.denied': '老板驳回签字',
     'dispatch.decision': '派单决策',
     'worker.assigned': '工人调岗',
     'agent.iteration': '推理轮次',

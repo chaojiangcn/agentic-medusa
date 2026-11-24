@@ -384,11 +384,47 @@ export interface ConfigView {
   tickMs: number
   maxTokensPerTurn: number
   maxCallsPerMinute: number
+  /** When false, only operator-submitted orders enter the workshop. */
+  autoDemo: boolean
   /** Only a boolean — never the API key itself. */
   hasApiKey: boolean
   protocolVersion: string
   userAgent: string
   configHome: string
+}
+
+// ---------------------------------------------------------------------------
+// Order desk — the single intake for work orders
+// ---------------------------------------------------------------------------
+
+export interface CriterionDecl { id: string; label: string }
+
+export interface OrderTemplate {
+  id: string
+  title: string
+  goal: string
+  criteria: CriterionDecl[]
+}
+
+export interface OrderTemplates {
+  templates: OrderTemplate[]
+  criteria: CriterionDecl[]
+  queued: number
+  autoDemo: boolean
+  playing: boolean
+}
+
+/** What `turn/start` / POST /api/orders return: a queue receipt, not a turn. */
+export interface OrderReceipt {
+  ok: boolean
+  accepted: boolean
+  taskId: string
+  title: string
+  goal: string
+  criteria: CriterionDecl[]
+  queuePosition: number
+  source: string
+  note: string
 }
 
 // ---------------------------------------------------------------------------
@@ -401,6 +437,12 @@ export interface ApprovalRequest {
   taskId: string
   turnId: string
   options: string[]
+  /** 'tool' = a device signature; anything else = the boss's patrol gate. */
+  kind?: string
+  toolName?: string
+  label?: string
+  callId?: string
+  args?: Record<string, unknown>
 }
 
 export interface ApprovalReply {

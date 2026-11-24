@@ -8,7 +8,9 @@ import type {
   ApprovalRequest,
   ConfigView,
   ControlCommand,
+  CriterionDecl,
   Frame,
+  OrderTemplate,
   RpcMessage,
   Snapshot,
   ThreadInfo,
@@ -54,6 +56,8 @@ interface MedusaState {
   selectedWorkerId: string | null
   approval: { id: number | string; request: ApprovalRequest } | null
   config: ConfigView | null
+  /** Templates + criteria arrive with the initialize handshake. */
+  orderDesk: { templates: OrderTemplate[]; criteria: CriterionDecl[] } | null
   threads: ThreadInfo[]
   activeThread: string
   protocolVersion: string
@@ -82,6 +86,7 @@ export const useMedusaStore = create<MedusaState>((set, get) => ({
   selectedWorkerId: null,
   approval: null,
   config: null,
+  orderDesk: null,
   threads: [],
   activeThread: 'main',
   protocolVersion: '—',
@@ -132,8 +137,17 @@ export const useMedusaStore = create<MedusaState>((set, get) => ({
             speed: frame.snapshot?.speed ?? state.speed,
           }
         }),
-      onNotification: () => {
-        // Fine-grained notifications are surfaced through frames + event log.
+      onNotification: (method, params) => {
+        // A timed-out signature gate must not leave a dead approval card on
+        // screen. The server broadcasts the expiry with the request id.
+        if (method === 'approval/expired') {
+          const p = (params ?? {}) as { id?: number | string }
+          const current = get().approval
+          if (current && (p.id === undefined || Number(current.id) === Number(p.id))) {
+            set({ approval: null, playing: true })
+          }
+        }
+        // Other fine-grained notifications surface through frames + event log.
       },
       onServerRequest: (msg: RpcMessage) => {
         set({
@@ -154,6 +168,11 @@ export const useMedusaStore = create<MedusaState>((set, get) => ({
             configHome: String(result.configHome ?? '—'),
             activeThread: String(result.activeThread ?? 'main'),
           })
+        }
+        const templates = result.templates as OrderTemplate[] | undefined
+        const criteria = result.criteria as CriterionDecl[] | undefined
+        if (Array.isArray(templates) && Array.isArray(criteria)) {
+          set({ orderDesk: { templates, criteria } })
         }
         // Replay the persisted log so a reload restores the exact timeline.
         void get()

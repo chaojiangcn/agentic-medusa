@@ -10,6 +10,7 @@
 
 use crate::protocol::CriterionView;
 use crate::protocol::SessionEvent;
+use serde_json::Value;
 use std::collections::HashSet;
 
 const C_CONCLUSION: (&str, &str) = ("conclusion", "有可交付结论");
@@ -22,7 +23,9 @@ const C_APPROVED: (&str, &str) = ("approved", "高风险动作已签字");
 pub struct Goal {
     pub id: String,
     pub text: String,
-    pub criteria: Vec<(&'static str, &'static str)>,
+    /// Owned strings: an operator can declare their own criteria at
+    /// turn.started, so the goal is no longer limited to built-in tuples.
+    pub criteria: Vec<(String, String)>,
 }
 
 /// The judge's output. `checks` is the whole ledger, not just the failures:
@@ -83,6 +86,50 @@ pub fn goal_for(title: &str) -> Goal {
     Goal {
         id: id.into(),
         text: text.into(),
+        criteria: criteria
+            .into_iter()
+            .map(|(id, label)| (id.to_string(), label.to_string()))
+            .collect(),
+    }
+}
+
+/// Rebuild a work order's goal from its own opening fact. The judge must read
+/// the criteria the operator declared, not re-guess them from the title:
+/// otherwise a custom order would be graded against a different rubric than
+/// the model was given. Falls back to the built-in goal for old logs.
+pub fn goal_from_events(events: &[SessionEvent], title: &str) -> Goal {
+    let fallback = goal_for(title);
+    let opening = events.iter().find(|e| e.kind == "turn.started");
+    let Some(ev) = opening else { return fallback };
+    let Some(arr) = ev.payload.get("criteria").and_then(Value::as_array) else {
+        return fallback;
+    };
+    let criteria: Vec<(String, String)> = arr
+        .iter()
+        .filter_map(|c| {
+            let id = c.get("id").and_then(Value::as_str)?;
+            let label = c.get("label").and_then(Value::as_str).unwrap_or(id);
+            Some((id.to_string(), label.to_string()))
+        })
+        .collect();
+    if criteria.is_empty() {
+        return fallback;
+    }
+    Goal {
+        id: ev
+            .payload
+            .get("goalId")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("custom")
+            .to_string(),
+        text: ev
+            .payload
+            .get("goal")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(fallback.text.as_str())
+            .to_string(),
         criteria,
     }
 }
@@ -97,6 +144,9 @@ pub fn judge(events: &[SessionEvent], goal: &Goal) -> Verdict {
     let mut conclusion_seq = 0u64;
     let mut devices: Vec<(String, u64)> = Vec::new();
     let mut approval_seq = 0u64;
+    /// A risky device was *asked for* or ran, whether or not it succeeded.
+    /// A refused call still counts as an attempt that needed a signature.
+    let mut risky_seq = 0u64;
 
     for ev in events {
         match ev.kind.as_str() {
@@ -113,6 +163,21 @@ pub fn judge(events: &[SessionEvent], goal: &Goal) -> Verdict {
                     closed.insert(id.clone());
                 }
             }
+            "tool.call" => {
+                let name = ev
+                    .payload
+                    .get("toolName")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let permission = ev
+                    .payload
+                    .get("permission")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if (permission == "approval" || name == "shell.exec") && risky_seq == 0 {
+                    risky_seq = ev.seq;
+                }
+            }
             "tool.result" => {
                 let name = ev
                     .payload
@@ -120,8 +185,33 @@ pub fn judge(events: &[SessionEvent], goal: &Goal) -> Verdict {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
+                if name == "shell.exec" && risky_seq == 0 {
+                    risky_seq = ev.seq;
+                }
+                // A refused device produces no evidence. Counting it would
+                // let a blocked shell call satisfy a criterion on its own.
+                let ok = ev
+                    .payload
+                    .get("ok")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                if !ok {
+                    continue;
+                }
                 if !name.is_empty() {
                     devices.push((name, ev.seq));
+                }
+            }
+            // A tool approval is a first-class signature fact. The older
+            // boss/intervention note is still accepted for replayed logs.
+            "approval.granted" => {
+                let decision = ev
+                    .payload
+                    .get("decision")
+                    .and_then(Value::as_str)
+                    .unwrap_or("allow");
+                if decision == "allow" {
+                    approval_seq = ev.seq;
                 }
             }
             "boss.intervention" => {
@@ -148,7 +238,7 @@ pub fn judge(events: &[SessionEvent], goal: &Goal) -> Verdict {
 
     let mut checks = Vec::new();
     for (id, label) in &goal.criteria {
-        let (ok, note, evidence) = match *id {
+        let (ok, note, evidence) = match id.as_str() {
             "conclusion" => (
                 has_conclusion,
                 if has_conclusion {
@@ -170,35 +260,31 @@ pub fn judge(events: &[SessionEvent], goal: &Goal) -> Verdict {
                 Some(seq) => (true, "装订机产出过交付件".to_string(), seq),
                 None => (false, "没有交付件产出".to_string(), 0),
             },
-            "approved" => match used(&["shell.exec"]) {
-                Some(seq) if approval_seq == 0 => (
-                    false,
-                    "高风险设备被调用，但没有签字记录".to_string(),
-                    seq,
-                ),
-                Some(_) => (true, "高风险动作有签字".to_string(), approval_seq),
-                // No risky device was touched, so the criterion is vacuous.
-                None => (true, "未触发高风险动作".to_string(), 0),
-            },
-            _ => (true, "未定义的判据，默认放行".to_string(), 0),
+            // Declaring `approved` is a requirement, not a conditional. A
+            // denied or timed-out signature must fail the order — otherwise
+            // "reject" would be indistinguishable from "pass".
+            "approved" => {
+                if approval_seq > 0 {
+                    (true, "高风险动作有签字".to_string(), approval_seq)
+                } else if risky_seq > 0 {
+                    (
+                        false,
+                        "高风险设备被调用，但没有签字记录（被驳回或超时）".to_string(),
+                        risky_seq,
+                    )
+                } else {
+                    (false, "声明了签字判据，但日志里没有签字事实".to_string(), 0)
+                }
+            }
+            _ => (false, "未定义的判据，日志里找不到证据".to_string(), 0),
         };
-        if !ok {
-            checks.push(CriterionView {
-                id: (*id).into(),
-                label: (*label).into(),
-                ok,
-                note,
-                evidence_seq: evidence,
-            });
-        } else {
-            checks.push(CriterionView {
-                id: (*id).into(),
-                label: (*label).into(),
-                ok,
-                note,
-                evidence_seq: evidence,
-            });
-        }
+        checks.push(CriterionView {
+            id: id.clone(),
+            label: label.clone(),
+            ok,
+            note,
+            evidence_seq: evidence,
+        });
     }
 
     let missing: Vec<String> = checks
@@ -305,6 +391,72 @@ mod tests {
             ev(5, "boss.intervention", None, json!({ "note": "审批 allow" })),
         ];
         assert!(judge(&events, &goal).passed);
+    }
+
+    #[test]
+    fn custom_criteria_come_from_the_opening_fact() {
+        let events = vec![ev(
+            1,
+            "turn.started",
+            None,
+            json!({
+                "title": "用户自己起的名字",
+                "goal": "自定义目标",
+                "goalId": "custom",
+                "criteria": [{ "id": "source", "label": "结论有来源支撑" }]
+            }),
+        )];
+        let goal = goal_from_events(&events, "用户自己起的名字");
+        assert_eq!(goal.id, "custom");
+        assert_eq!(goal.criteria.len(), 1, "must not fall back to a title-based goal");
+        assert_eq!(goal.criteria[0].0, "source");
+        assert!(!judge(&events, &goal).passed, "no search receipt means the declared criterion is unmet");
+    }
+
+    #[test]
+    fn tool_signature_clears_a_custom_approved_criterion() {
+        let events = vec![
+            ev(1, "turn.started", None, json!({
+                "title": "合规复核",
+                "criteria": [{ "id": "approved", "label": "高风险动作已签字" }]
+            })),
+            ev(2, "item.agentMessage.delta", Some("i1"), json!({ "delta": "结论" })),
+            ev(3, "item.completed", Some("i1"), json!({})),
+            ev(4, "tool.result", Some("t2"), json!({ "toolName": "shell.exec", "ok": true })),
+            ev(5, "approval.granted", None, json!({ "decision": "allow", "toolName": "shell.exec" })),
+        ];
+        let goal = goal_from_events(&events, "合规复核");
+        assert!(judge(&events, &goal).passed);
+    }
+
+    #[test]
+    fn a_denied_signature_fails_the_approved_criterion() {
+        let events = vec![
+            ev(1, "turn.started", None, json!({
+                "title": "合规复核",
+                "criteria": [{ "id": "approved", "label": "高风险动作已签字" }]
+            })),
+            ev(2, "item.agentMessage.delta", Some("i1"), json!({ "delta": "结论" })),
+            ev(3, "item.completed", Some("i1"), json!({})),
+            ev(4, "tool.call", Some("t2"), json!({ "toolName": "shell.exec", "permission": "approval" })),
+            ev(5, "approval.denied", None, json!({ "decision": "deny", "toolName": "shell.exec" })),
+            ev(6, "tool.result", Some("t2"), json!({ "toolName": "shell.exec", "ok": false, "receipt": "老板未签字" })),
+        ];
+        let goal = goal_from_events(&events, "合规复核");
+        let v = judge(&events, &goal);
+        assert!(!v.passed, "a refused call must not pass as 'no risky action'");
+        assert!(v.missing.iter().any(|m| m.contains("签字")));
+    }
+
+    #[test]
+    fn declared_signature_with_no_signature_fact_fails() {
+        let goal = goal_for("合规复核");
+        let events = vec![
+            ev(1, "item.agentMessage.delta", Some("i1"), json!({ "delta": "结论" })),
+            ev(2, "item.completed", Some("i1"), json!({})),
+            ev(3, "tool.result", Some("t1"), json!({ "toolName": "kb.search", "ok": true })),
+        ];
+        assert!(!judge(&events, &goal).passed);
     }
 
     #[test]

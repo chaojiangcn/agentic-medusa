@@ -567,6 +567,10 @@ pub struct AppConfig {
     pub tick_ms: u64,
     pub max_tokens_per_turn: u64,
     pub max_calls_per_minute: u32,
+    /// When false the floor only runs work orders the operator submits.
+    /// Both fresh installs and older config files default to a quiet floor.
+    #[serde(default)]
+    pub auto_demo: bool,
     /// Redacted view returned to the UI: never carries a secret.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_api_key: Option<bool>,
@@ -582,6 +586,7 @@ impl Default for AppConfig {
             tick_ms: 420,
             max_tokens_per_turn: 4000,
             max_calls_per_minute: 20,
+            auto_demo: false,
             has_api_key: None,
         }
     }
@@ -598,8 +603,38 @@ pub struct ConfigView {
     pub tick_ms: u64,
     pub max_tokens_per_turn: u64,
     pub max_calls_per_minute: u32,
+    pub auto_demo: bool,
     pub has_api_key: bool,
     pub protocol_version: String,
     pub user_agent: String,
     pub config_home: String,
+}
+
+// ---------------------------------------------------------------------------
+// Work orders — the only way a task enters the workshop
+// ---------------------------------------------------------------------------
+
+/// One acceptance criterion as declared by whoever opened the order.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CriterionDecl {
+    pub id: String,
+    pub label: String,
+}
+
+/// A submitted work order. It is *queued*, never emitted directly by the
+/// caller: the runtime driver drains the queue on the next tick so a human
+/// order, a REST order and a demo order all travel the exact same path
+/// (turn.started -> dispatch.decision -> item.started -> agent loop -> verdict).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkOrder {
+    pub id: String,
+    pub title: String,
+    pub goal: String,
+    pub goal_id: String,
+    pub criteria: Vec<CriterionDecl>,
+    /// "human" | "api" | "demo" — kept as a fact at turn.started.
+    pub source: String,
+    pub note: String,
 }

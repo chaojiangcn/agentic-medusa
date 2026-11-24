@@ -28,7 +28,7 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
@@ -47,9 +47,161 @@ pub struct AppState {
     pub active_thread: Mutex<String>,
     pub tx: broadcast::Sender<String>,
     pub approvals: Mutex<HashMap<u64, oneshot::Sender<ApprovalReply>>>,
+    /// Submitted work orders waiting for the driver's next tick.
+    pub orders: Mutex<VecDeque<WorkOrder>>,
     pub next_id: AtomicU64,
     pub llm_calls: AtomicU64,
     pub initialized: AtomicBool,
+}
+
+/// The criteria a work order may declare. The oracle only knows how to find
+/// evidence for these ids, so the intake gate rejects anything else.
+const CRITERIA: &[(&str, &str)] = &[
+    ("conclusion", "有可交付结论"),
+    ("source", "结论有来源支撑"),
+    ("crosscheck", "做过交叉校验"),
+    ("delivered", "产出交付件"),
+    ("approved", "高风险动作已签字"),
+];
+
+/// One-click recipes at the order desk. `compliance` is the interesting one:
+/// it makes the model reach for the approval-gated device, which suspends the
+/// turn until the operator signs it.
+const TEMPLATES: &[(&str, &str, &str, &[&str])] = &[
+    ("draft", "生成结论草稿", "产出一份能直接交给下一环节的结论", &["conclusion"]),
+    ("lookup", "检索内部知识", "检索并归纳内部知识", &["conclusion", "source"]),
+    ("verify", "交叉验证数据", "两份数据交叉比对，标出差异", &["conclusion", "crosscheck"]),
+    ("package", "整理交付件", "把结论整理成可交付的成品", &["conclusion", "delivered"]),
+    ("synthesize", "汇总多方结论", "汇总多来源结论并交付", &["conclusion", "crosscheck", "delivered"]),
+    ("compliance", "合规复核", "复核结论是否合规且可追溯", &["conclusion", "source", "approved"]),
+];
+
+fn criterion_label(id: &str) -> Option<&'static str> {
+    CRITERIA.iter().find(|(k, _)| *k == id).map(|(_, v)| *v)
+}
+
+fn template_json() -> Vec<Value> {
+    TEMPLATES
+        .iter()
+        .map(|(id, title, goal, ids)| {
+            json!({
+                "id": id,
+                "title": title,
+                "goal": goal,
+                "criteria": ids.iter().map(|c| json!({ "id": c, "label": criterion_label(c).unwrap_or(c) })).collect::<Vec<_>>()
+            })
+        })
+        .collect()
+}
+
+fn criteria_json() -> Vec<Value> {
+    CRITERIA
+        .iter()
+        .map(|(id, label)| json!({ "id": id, "label": label }))
+        .collect()
+}
+
+/// Parse + validate one submitted order. Everything that enters the log is
+/// declared here, up front — the oracle grades exactly this rubric.
+fn parse_order(state: &Arc<AppState>, params: &Value, source: &str) -> Result<WorkOrder, String> {
+    let text = |k: &str| params.get(k).and_then(Value::as_str).unwrap_or("").trim().to_string();
+    let template_id = text("template");
+    let template = TEMPLATES.iter().find(|(id, _, _, _)| *id == template_id);
+    let title = {
+        let t = text("title");
+        if !t.is_empty() {
+            t
+        } else if let Some((_, t, _, _)) = template {
+            (*t).to_string()
+        } else {
+            "未命名工单".to_string()
+        }
+    };
+    if title.chars().count() > 80 {
+        return Err("工单标题最多 80 字".into());
+    }
+
+    let mut criteria: Vec<CriterionDecl> = Vec::new();
+    if let Some(arr) = params.get("criteria").and_then(Value::as_array) {
+        for c in arr {
+            let id = c
+                .as_str()
+                .map(String::from)
+                .or_else(|| c.get("id").and_then(Value::as_str).map(String::from))
+                .unwrap_or_default();
+            let Some(label) = criterion_label(&id) else {
+                return Err(format!("未知判据 {id}；可用：{}", CRITERIA.iter().map(|(k, _)| *k).collect::<Vec<_>>().join(", ")));
+            };
+            if !criteria.iter().any(|x| x.id == id) {
+                criteria.push(CriterionDecl { id, label: label.into() });
+            }
+        }
+    } else if let Some((_, _, _, ids)) = template {
+        for id in *ids {
+            if let Some(label) = criterion_label(id) {
+                criteria.push(CriterionDecl { id: (*id).into(), label: label.into() });
+            }
+        }
+    }
+    if criteria.is_empty() {
+        let fallback = crate::oracle::goal_for(&title);
+        criteria = fallback
+            .criteria
+            .iter()
+            .map(|(id, label)| CriterionDecl { id: id.clone(), label: label.clone() })
+            .collect();
+    }
+
+    let goal = {
+        let g = text("goal");
+        if !g.is_empty() {
+            g
+        } else if let Some((_, _, t, _)) = template {
+            (*t).to_string()
+        } else {
+            crate::oracle::goal_for(&title).text
+        }
+    };
+    let goal_id = if template_id.is_empty() {
+        crate::oracle::goal_for(&title).id
+    } else {
+        template_id.clone()
+    };
+    let id = format!("M{:03}", state.next_id.fetch_add(1, Ordering::Relaxed));
+    let note = if source == "api" {
+        "REST /api/orders 投料".to_string()
+    } else {
+        "3D 投单台投料".to_string()
+    };
+    Ok(WorkOrder {
+        id,
+        title,
+        goal,
+        goal_id,
+        criteria,
+        source: source.into(),
+        note,
+    })
+}
+
+async fn enqueue_order(state: &Arc<AppState>, params: Value, source: &str) -> Result<Value, String> {
+    let order = parse_order(state, &params, source)?;
+    let position = {
+        let mut q = state.orders.lock().await;
+        q.push_back(order.clone());
+        q.len()
+    };
+    Ok(json!({
+        "ok": true,
+        "accepted": true,
+        "taskId": order.id,
+        "title": order.title,
+        "goal": order.goal,
+        "criteria": order.criteria,
+        "queuePosition": position,
+        "source": order.source,
+        "note": "已排队，下一个节拍由派单台接收并进入 agent loop"
+    }))
 }
 
 impl AppState {
@@ -59,6 +211,16 @@ impl AppState {
             .first()
             .map(|t| t.id.clone())
             .unwrap_or_else(|| "main".into());
+        // Work-order ids must survive a restart. Reusing M001 would collide
+        // with the persisted log and make replay ambiguous.
+        let next_order = store
+            .all_events()
+            .iter()
+            .filter_map(|e| e.task_id.as_deref())
+            .filter_map(|t| t.strip_prefix('M').and_then(|s| s.parse::<u64>().ok()))
+            .max()
+            .map(|n| n + 1)
+            .unwrap_or(1);
         let mut snap = initial_snapshot(&thread);
         snap.threads = store.threads();
         let (tx, _rx) = broadcast::channel::<String>(512);
@@ -69,7 +231,8 @@ impl AppState {
             active_thread: Mutex::new(thread),
             tx,
             approvals: Mutex::new(HashMap::new()),
-            next_id: AtomicU64::new(1),
+            orders: Mutex::new(VecDeque::new()),
+            next_id: AtomicU64::new(next_order),
             llm_calls: AtomicU64::new(0),
             initialized: AtomicBool::new(false),
         })
@@ -108,6 +271,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/context", get(context_read))
         .route("/api/observations", get(observations_read))
         .route("/api/models", get(models_read))
+        .route("/api/orders", get(orders_read))
+        .route("/api/orders", post(orders_create))
         .route("/api/events", post(ingest))
         .route("/api/control", post(control))
         .route("/api/stream", get(sse))
@@ -163,9 +328,10 @@ async fn protocol_info() -> impl IntoResponse {
         "requests": [
             "initialize", "thread/start", "thread/list", "thread/resume",
             "thread/fork", "thread/read", "turn/start", "turn/interrupt",
-            "control", "config/read", "config/write", "event/ingest",
-            "session/replay", "session/context", "approval/respond",
-            "tools/list", "tools/call", "camera/list", "camera/capture"
+            "orders/templates", "control", "config/read", "config/write",
+            "event/ingest", "session/replay", "session/context",
+            "approval/respond", "tools/list", "tools/call",
+            "camera/list", "camera/capture"
         ],
         "notifications": [
             "thread/started", "turn/started", "turn/completed", "turn/failed",
@@ -175,6 +341,7 @@ async fn protocol_info() -> impl IntoResponse {
             "boss/patrol", "boss/inspection", "boss/intervention",
             "dispatch/decision", "worker/assigned",
             "tool/call", "tool/result",
+            "approval/granted", "approval/denied",
             "camera/capture", "camera/blindspot",
             "workshop/snapshot", "system/control", "config/updated", "session/event"
         ],
@@ -275,6 +442,34 @@ async fn models_read(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             "rejected": snap.metrics.rejected
         }
     }))
+}
+
+/// The order desk over plain HTTP, so `curl` is enough to play the workshop.
+/// GET explains the contract; POST queues one work order.
+async fn orders_read(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(json!({
+        "howto": "POST /api/orders {\"title\": \"...\", \"goal\"?: \"...\", \"criteria\"?: [\"source\",\"approved\"], \"template\"?: \"compliance\"}",
+        "templates": template_json(),
+        "criteria": criteria_json(),
+        "queued": state.orders.lock().await.len(),
+        "autoDemo": state.config.get().auto_demo,
+        "playing": state.snapshot.lock().await.playing,
+        "example": "curl -s -X POST http://127.0.0.1:8787/api/orders -H \"Content-Type: application/json\" -d \"{\\\"template\\\":\\\"compliance\\\"}\""
+    }))
+}
+
+async fn orders_create(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    match enqueue_order(&state, body, "api").await {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": e })),
+        )
+            .into_response(),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -669,11 +864,19 @@ async fn dispatch(
                     "agentLoop": true,
                     "agentLoopMaxIterations": 4,
                     "modelLog": true,
-                    "verdict": "oracle"
+                    "verdict": "oracle",
+                    "orderQueue": true,
+                    "customCriteria": true,
+                    "toolApproval": true
                 },
                 "configHome": state.config.home.display().to_string(),
                 "config": state.config.view(),
                 "activeThread": state.active_thread.lock().await.clone(),
+                // Ship the order desk with the handshake so the first paint
+                // already has the rubric — no extra round trip, no blank desk.
+                "templates": template_json(),
+                "criteria": criteria_json(),
+                "autoDemo": state.config.get().auto_demo
             }))
         }
         "initialized" => Ok(json!({ "ok": true })),
@@ -760,77 +963,21 @@ async fn dispatch(
             Ok(json!({ "thread": info, "note": "老板开了一条支线" }))
         }
 
-        "turn/start" => {
-            let thread = state.active_thread.lock().await.clone();
-            let title = if s("title").is_empty() {
-                "人工投料工单".into()
-            } else {
-                s("title")
-            };
-            let task_id = format!("M{:03}", state.next_id.fetch_add(1, Ordering::Relaxed));
-            let turn_id = format!("turn-{}", crate::session::short_id());
-            let item_id = format!("item-{}-{}", task_id, crate::session::short_id());
-            emit(
-                state,
-                SessionEvent::new(0, &thread, "turn.started", "human", json!({
-                    "taskId": task_id, "title": title
-                }))
-                .with_turn(&turn_id)
-                .with_task(&task_id),
-            )
+        // A turn is not emitted by the caller. It is queued, then opened by
+        // the runtime driver on its next tick. That is what guarantees a
+        // human order, a REST order and a demo order all travel the same
+        // path: dispatcher -> agent loop -> oracle -> verdict.
+        "turn/start" => enqueue_order(state, params, "human")
             .await
-            .map_err(|e| (ERR_INVALID_PARAMS, e.to_string()))?;
+            .map_err(|e| (ERR_INVALID_PARAMS, e)),
 
-            // A human order goes through the same dispatcher as generated
-            // work: the assignment and its reasoning are logged facts.
-            let workers = state.snapshot.lock().await.workers.clone();
-            let decision = crate::dispatch::decide("intake", &workers);
-            let worker_id = match &decision {
-                Some(d) => {
-                    for ev in crate::workshop::dispatch_events(&thread, &task_id, &turn_id, d) {
-                        emit(state, ev)
-                            .await
-                            .map_err(|e| (ERR_INVALID_PARAMS, e.to_string()))?;
-                    }
-                    d.worker_id.clone()
-                }
-                None => "w1".to_string(),
-            };
-            emit(
-                state,
-                SessionEvent::new(0, &thread, "item.started", &worker_id, json!({
-                    "kind": "agentMessage", "stageId": "intake"
-                }))
-                .with_turn(&turn_id)
-                .with_item(&item_id)
-                .with_task(&task_id)
-                .with_worker(&worker_id)
-                .with_stage("intake"),
-            )
-            .await
-            .map_err(|e| (ERR_INVALID_PARAMS, e.to_string()))?;
-            emit(
-                state,
-                SessionEvent::new(0, &thread, "item.agentMessage.delta", &worker_id, json!({
-                    "delta": "人工投料：已接收，进入检索工位。", "tokens": 12
-                }))
-                .with_turn(&turn_id)
-                .with_item(&item_id)
-                .with_task(&task_id)
-                .with_worker(&worker_id)
-                .with_stage("intake"),
-            )
-            .await
-            .map_err(|e| (ERR_INVALID_PARAMS, e.to_string()))?;
-            Ok(json!({
-                "turnId": turn_id, "taskId": task_id, "status": "running",
-                "workerId": worker_id,
-                "dispatch": decision.map(|d| json!({
-                    "stageId": d.stage_id, "workerId": d.worker_id,
-                    "score": d.score, "reason": d.reason
-                }))
-            }))
-        }
+        "orders/templates" => Ok(json!({
+            "templates": template_json(),
+            "criteria": criteria_json(),
+            "queued": state.orders.lock().await.len(),
+            "autoDemo": state.config.get().auto_demo,
+            "playing": state.snapshot.lock().await.playing
+        })),
         "turn/interrupt" => {
             let thread = state.active_thread.lock().await.clone();
             let task_id = s("taskId");
@@ -933,23 +1080,38 @@ async fn dispatch(
                 .await
                 .map_err(|e| (ERR_INVALID_PARAMS, e.to_string()))?;
 
-            // The capability seam lives here, not in the browser: an
-            // approval-gated device is refused by the protocol layer itself.
-            let (outcome, blocked) = if tool.permission == "approval" {
-                (
-                    ToolOutcome {
-                        ok: false,
-                        receipt: "需老板签字，设备未启动".into(),
-                        duration_ms: 0,
-                    },
-                    true,
+            // The capability seam lives here, not in the browser: a risky
+            // device is never started without a signature, whether the model
+            // asked for it or a human pressed the button in the equipment tab.
+            let (ok, receipt, duration, blocked) = if tool.permission == "approval" {
+                let signed = crate::workshop::request_tool_approval(
+                    state,
+                    &thread,
+                    &turn_id,
+                    &task_id,
+                    &worker_id,
+                    &tool.stage_id,
+                    &name,
+                    &tool.label,
+                    &item_id,
+                    &args,
                 )
+                .await;
+                if signed {
+                    let o = registry.execute(&name, &args);
+                    (
+                        o.ok,
+                        format!("老板签字后执行 · {}", o.receipt),
+                        o.duration_ms,
+                        false,
+                    )
+                } else {
+                    (false, "老板未签字，设备未启动".to_string(), 0, true)
+                }
             } else {
-                (registry.execute(&name, &args), false)
+                let o = registry.execute(&name, &args);
+                (o.ok, o.receipt, o.duration_ms, false)
             };
-            let ok = outcome.ok;
-            let receipt = outcome.receipt;
-            let duration = outcome.duration_ms;
 
             let mut result = SessionEvent::new(
                 0,

@@ -307,6 +307,31 @@ pub fn project(snap: &mut Snapshot, ev: &SessionEvent) {
                 }
             }
         }
+        // A signature is a fact, so the ledger lights up the moment the boss
+        // signs — not only when the final verdict is computed.
+        "approval.granted" | "approval.denied" => {
+            let granted = ev.kind == "approval.granted";
+            let tool_name = s("toolName");
+            snap.boss.mode = "inspect".into();
+            snap.boss.note = format!(
+                "{} {}",
+                if granted { "签字放行" } else { "驳回" },
+                tool_name
+            );
+            if granted {
+                if let Some(task) = snap
+                    .tasks
+                    .iter_mut()
+                    .find(|t| Some(&t.id) == ev.task_id.as_ref())
+                {
+                    if let Some(c) = task.criteria.iter_mut().find(|c| c.id == "approved") {
+                        c.ok = true;
+                        c.note = "老板已签字".into();
+                        c.evidence_seq = ev.seq;
+                    }
+                }
+            }
+        }
         "dispatch.decision" => {
             let record = DispatchRecord {
                 task_id: s("taskId"),
@@ -725,7 +750,76 @@ pub fn dispatch_events(
     out
 }
 
-pub fn plan_tick(snap: &Snapshot, tick: u64, counter: &mut u64, seed: &mut u64) -> TickPlan {
+/// Turn a queued work order into the same three opening facts a demo order
+/// produces. This is the single entry point for *all* tasks: the caller only
+/// queues, the driver emits, and the agent loop owns everything after that.
+pub fn order_events(
+    thread_id: &str,
+    order: &WorkOrder,
+    workers: &[Worker],
+) -> Vec<SessionEvent> {
+    let turn_id = format!("turn-{}", crate::session::short_id());
+    let item_id = format!("item-{}-{}", order.id, crate::session::short_id());
+    let criteria: Vec<Value> = order
+        .criteria
+        .iter()
+        .map(|c| json!({ "id": c.id, "label": c.label }))
+        .collect();
+    let mut out = vec![SessionEvent::new(
+        0,
+        thread_id,
+        "turn.started",
+        &order.source,
+        json!({
+            "taskId": order.id,
+            "title": order.title,
+            "goal": order.goal,
+            "goalId": order.goal_id,
+            "criteria": criteria,
+            "source": order.source,
+            "note": order.note
+        }),
+    )
+    .with_turn(&turn_id)
+    .with_task(&order.id)];
+
+    let pick = decide("intake", workers);
+    let worker_id = match &pick {
+        Some(decision) => {
+            out.extend(dispatch_events(thread_id, &order.id, &turn_id, decision));
+            decision.worker_id.clone()
+        }
+        None => "w1".to_string(),
+    };
+    out.push(
+        SessionEvent::new(
+            0,
+            thread_id,
+            "item.started",
+            &worker_id,
+            json!({
+                "kind": "agentMessage",
+                "stageId": "intake",
+                "dispatched": pick.is_some(),
+                "source": order.source
+            }),
+        )
+        .with_turn(&turn_id)
+        .with_item(&item_id)
+        .with_task(&order.id)
+        .with_worker(&worker_id)
+        .with_stage("intake"),
+    );
+    out
+}
+
+pub fn plan_tick(
+    snap: &Snapshot,
+    tick: u64,
+    counter: &mut u64,
+    seed: &mut u64,
+    auto_demo: bool,
+) -> TickPlan {
     let mut events = Vec::new();
     *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     let rnd = || -> f64 { ((*seed >> 33) as f64) / (u32::MAX as f64) };
@@ -740,7 +834,7 @@ pub fn plan_tick(snap: &Snapshot, tick: u64, counter: &mut u64, seed: &mut u64) 
             })),
         );
     }
-    let mut approval = None;
+    let mut approval: Option<ApprovalPlan> = None;
     for (i, (sid, _name, sx, _color)) in STAGES.iter().enumerate() {
         if (bx - sx).abs() < 0.9 && tick % 3 == 0 {
             events.push(
@@ -749,21 +843,10 @@ pub fn plan_tick(snap: &Snapshot, tick: u64, counter: &mut u64, seed: &mut u64) 
                 }))
                 .with_stage(sid),
             );
-            // Roughly one in nine inspections escalates to a human gate.
-            if rnd() < 0.11 {
-                approval = Some(ApprovalPlan {
-                    stage: (*sid).into(),
-                    note: format!("老板在 {} 抽查到疑点，需要放行或叫停", sid),
-                    task_id: snap
-                        .tasks
-                        .iter()
-                        .rev()
-                        .find(|t| t.status == "running")
-                        .map(|t| t.id.clone())
-                        .unwrap_or_default(),
-                    turn_id: String::new(),
-                });
-            }
+            // The only human gate is now a *device* signature. A random
+            // spot-check approval would compete with it for the one approval
+            // card in the UI, so patrol stays observational: it reports what
+            // the boss saw and never suspends a turn by itself.
         }
         let _ = i;
     }
@@ -775,7 +858,9 @@ pub fn plan_tick(snap: &Snapshot, tick: u64, counter: &mut u64, seed: &mut u64) 
         .cloned()
         .collect();
 
-    if tick % 5 == 0 && active.len() < 5 {
+    // Demo orders are opt-in. When the operator is playing, the only work on
+    // the floor is what they submitted from the order desk.
+    if auto_demo && tick % 8 == 0 && active.len() < 3 {
         *counter += 1;
         let task_id = format!("T{:03}", counter);
         let turn_id = format!("turn-{}", crate::session::short_id());
@@ -791,7 +876,8 @@ pub fn plan_tick(snap: &Snapshot, tick: u64, counter: &mut u64, seed: &mut u64) 
         events.push(
             SessionEvent::new(0, &thread_id, "turn.started", "system", json!({
                 "taskId": task_id, "title": title,
-                "goal": goal.text, "goalId": goal.id, "criteria": criteria
+                "goal": goal.text, "goalId": goal.id, "criteria": criteria,
+                "source": "demo", "note": "演示投料 · 可在投单台关闭"
             }))
             .with_turn(&turn_id)
             .with_task(&task_id),
@@ -975,6 +1061,8 @@ fn ui_method(kind: &str) -> &'static str {
         "config.updated" => "config/updated",
         "tool.call" => "tool/call",
         "tool.result" => "tool/result",
+        "approval.granted" => "approval/granted",
+        "approval.denied" => "approval/denied",
         "dispatch.decision" => "dispatch/decision",
         "worker.assigned" => "worker/assigned",
         "camera.capture" => "camera/capture",
@@ -993,7 +1081,18 @@ fn ui_method(kind: &str) -> &'static str {
 /// server-initiated request pattern).
 pub async fn run_driver(state: Arc<AppState>) {
     let mut tick: u64 = 0;
-    let mut counter: u64 = 0;
+    // Demo orders keep their own T### series; resume it from the log so a
+    // restart never reuses an id that is already on the floor.
+    let mut counter: u64 = {
+        let store = state.store.lock().await;
+        store
+            .all_events()
+            .iter()
+            .filter_map(|e| e.task_id.as_deref())
+            .filter_map(|t| t.strip_prefix('T').and_then(|s| s.parse::<u64>().ok()))
+            .max()
+            .unwrap_or(0)
+    };
     let mut seed: u64 = 20261120;
     let llm = LlmClient::new();
 
@@ -1028,14 +1127,33 @@ pub async fn run_driver(state: Arc<AppState>) {
         };
         tokio::time::sleep(Duration::from_millis(tick_ms)).await;
 
+        let auto_demo = state.config.get().auto_demo;
         let plan = {
             let mut snap = state.snapshot.lock().await;
             snap.tick += 1;
             tick += 1;
-            plan_tick(&snap, tick, &mut counter, &mut seed)
+            plan_tick(&snap, tick, &mut counter, &mut seed, auto_demo)
         };
 
-        for ev in plan.events {
+        // Every work order — typed in the UI, POSTed with curl, or generated
+        // by the demo driver — is drained here and emitted by this loop, so
+        // all of them reach run_agent_loop on the identical path.
+        let queued: Vec<WorkOrder> = {
+            let mut q = state.orders.lock().await;
+            let n = q.len().min(3);
+            q.drain(..n).collect()
+        };
+        let mut events: Vec<SessionEvent> = Vec::new();
+        if !queued.is_empty() {
+            let thread_id = state.active_thread.lock().await.clone();
+            let workers = state.snapshot.lock().await.workers.clone();
+            for order in &queued {
+                events.extend(order_events(&thread_id, order, &workers));
+            }
+        }
+        events.extend(plan.events);
+
+        for ev in events {
             // Once a turn starts, the agent loop owns the item until it either
             // concludes or runs out of iterations.
             if ev.kind == "item.started" {
@@ -1338,7 +1456,9 @@ async fn run_agent_loop(
             let store = state.store.lock().await;
             store.task_events(task_id)
         };
-        let goal = oracle::goal_for(title);
+        // Grade against the criteria declared when the order opened, not a
+        // rubric guessed from the title. Custom orders keep their own rules.
+        let goal = oracle::goal_from_events(&events, title);
         let verdict = oracle::judge(&events, &goal);
         let mut v_ev = SessionEvent::new(
             0,
@@ -1474,7 +1594,19 @@ async fn run_device(
     let (ok, receipt, duration_ms) = if spec.is_none() {
         (false, format!("未知设备 {}，未启动", call.name), 0)
     } else if permission == "approval" {
-        (false, "需老板签字，设备未启动".to_string(), 0)
+        // The model may *ask* for a risky device. Whether it runs is decided
+        // by a server-initiated approval request, never by the model itself.
+        let signed = request_tool_approval(
+            state, thread_id, turn_id, task_id, worker_id, stage,
+            &call.name, &label, &call.id, &args,
+        )
+        .await;
+        if signed {
+            let o = registry.execute(&call.name, &args);
+            (o.ok, format!("老板签字后执行 · {}", o.receipt), o.duration_ms)
+        } else {
+            (false, "老板未签字，设备未启动".to_string(), 0)
+        }
     } else {
         let o = registry.execute(&call.name, &args);
         (o.ok, o.receipt, o.duration_ms)
@@ -1500,6 +1632,95 @@ async fn run_device(
     if let Err(e) = emit(state, result_ev).await {
         eprintln!("tool.result failed: {e}");
     }
+}
+
+/// A risky device suspends the turn until the operator signs. The reply is a
+/// server-initiated JSON-RPC request (the same Codex pattern as the boss's
+/// inspection gate), and the outcome is written to the log as a signature
+/// fact — that fact is the only evidence the oracle accepts for `approved`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn request_tool_approval(
+    state: &Arc<AppState>,
+    thread_id: &str,
+    turn_id: &str,
+    task_id: &str,
+    worker_id: &str,
+    stage: &str,
+    tool_name: &str,
+    label: &str,
+    call_id: &str,
+    args: &Value,
+) -> bool {
+    let id = state.next_request_id();
+    let (tx, rx) = oneshot::channel::<ApprovalReply>();
+    state.approvals.lock().await.insert(id, tx);
+
+    state.broadcast(RpcMessage::request(
+        Value::from(id),
+        "approval/request",
+        json!({
+            "kind": "tool",
+            "toolName": tool_name,
+            "label": label,
+            "callId": call_id,
+            "args": args,
+            "stage": stage,
+            "taskId": task_id,
+            "turnId": turn_id,
+            "note": format!("工人 {} 想启动「{}」，这台设备需要老板签字", worker_id, label),
+            "options": ["allow", "deny"]
+        }),
+    ));
+
+    // An unattended request must not wedge the workshop forever. The safe
+    // default for a privileged device is to refuse, not to auto-allow.
+    let (reply, expired) = match tokio::time::timeout(Duration::from_secs(25), rx).await {
+        Ok(Ok(r)) => (r, false),
+        _ => (
+            ApprovalReply {
+                decision: "deny".into(),
+                note: "超时自动驳回".into(),
+            },
+            true,
+        ),
+    };
+    if expired {
+        state.broadcast(RpcMessage::notification(
+            "approval/expired",
+            json!({ "id": id, "decision": "deny", "note": "超时自动驳回" }),
+        ));
+    }
+
+    let allow = reply.decision == "allow";
+    let mut ev = SessionEvent::new(
+        0,
+        thread_id,
+        if allow { "approval.granted" } else { "approval.denied" },
+        "boss",
+        json!({
+            "decision": if allow { "allow" } else { "deny" },
+            "toolName": tool_name,
+            "callId": call_id,
+            "taskId": task_id,
+            "note": format!(
+                "{} · {}",
+                if allow { "签字放行" } else { "驳回" },
+                reply.note
+            ),
+            "by": "human"
+        }),
+    )
+    .with_item(&format!("approval-{}-{}", task_id, crate::session::short_id()))
+    .with_task(task_id)
+    .with_worker(worker_id)
+    .with_stage(stage);
+    if !turn_id.is_empty() {
+        ev = ev.with_turn(turn_id);
+    }
+    if let Err(e) = emit(state, ev).await {
+        eprintln!("approval fact failed: {e}");
+    }
+    allow
 }
 
 /// Stream the conclusion as deltas so the UI and the derived context see the

@@ -3,7 +3,9 @@
 import { useEffect, useState } from 'react'
 import { selectSnapshot, useMedusaStore } from '@/lib/store'
 import { eventDetail, eventLabel } from '@/lib/rpc'
-import type { CameraList, DerivedContext } from '@/lib/contract'
+import type {
+  CameraList, DerivedContext, OrderReceipt, OrderTemplate,
+} from '@/lib/contract'
 
 const STATUS_LABEL: Record<string, string> = {
   busy: '忙碌',
@@ -30,10 +32,18 @@ export function UI() {
   const snapshot = useMedusaStore(selectSnapshot)
   const {
     frames, cursor, playing, speed, connected, error, selectedWorkerId,
-    approval, config, threads, activeThread, protocolVersion, configHome,
+    approval, config, orderDesk, threads, activeThread, protocolVersion, configHome,
   } = store
-  const [tab, setTab] = useState<'workers' | 'tools' | 'dispatch' | 'observe' | 'config' | 'protocol'>('workers')
+  const [tab, setTab] = useState<'orders' | 'workers' | 'tools' | 'dispatch' | 'observe' | 'config' | 'protocol'>('orders')
   const [busy, setBusy] = useState(false)
+  // Order desk state. Criteria ids come from the App Server's template list;
+  // the browser never invents a rubric the oracle would not recognise.
+  const [orderTitle, setOrderTitle] = useState('合规复核')
+  const [orderGoal, setOrderGoal] = useState('')
+  const [orderCriteria, setOrderCriteria] = useState<string[]>(['conclusion', 'source', 'approved'])
+  const [orderBusy, setOrderBusy] = useState(false)
+  const [orderReceipt, setOrderReceipt] = useState<OrderReceipt | null>(null)
+  const [orderError, setOrderError] = useState<string | null>(null)
   const [toolResult, setToolResult] = useState<{ blocked: boolean; text: string } | null>(null)
   const [context, setContext] = useState<DerivedContext | null>(null)
   const [ctxTask, setCtxTask] = useState<string | null>(null)
@@ -120,6 +130,38 @@ export function UI() {
     }
   }
 
+  // The rubric arrives with the initialize handshake (App Server is the
+  // single source of truth), so the desk is usable on the very first paint.
+  const applyTemplate = (t: OrderTemplate) => {
+    setOrderTitle(t.title)
+    setOrderGoal('')
+    setOrderCriteria(t.criteria.map((c) => c.id))
+    setOrderReceipt(null)
+  }
+
+  const toggleCriterion = (id: string) =>
+    setOrderCriteria((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    )
+
+  const submitOrder = async (templateId?: string) => {
+    setOrderBusy(true)
+    setOrderError(null)
+    try {
+      // A paused floor would leave the order queued forever; resume it first.
+      if (snapshot && !snapshot.playing) await store.sendControl({ action: 'resume' })
+      const payload: Record<string, unknown> = templateId
+        ? { template: templateId }
+        : { title: orderTitle.trim(), goal: orderGoal.trim(), criteria: orderCriteria }
+      const res = await store.call<OrderReceipt>('turn/start', payload)
+      setOrderReceipt(res)
+    } catch (e) {
+      setOrderError(e instanceof Error ? e.message : '投单失败')
+    } finally {
+      setOrderBusy(false)
+    }
+  }
+
   // A manual capture is still read-only: it only appends observation facts.
   const captureNow = async (cameraId?: string) => {
     setObsBusy(true)
@@ -192,6 +234,7 @@ export function UI() {
 
       <aside className="panel left">
         <div className="tabs">
+          <button className={tab === 'orders' ? 'active' : ''} onClick={() => setTab('orders')}>投单</button>
           <button className={tab === 'workers' ? 'active' : ''} onClick={() => setTab('workers')}>车间</button>
           <button className={tab === 'tools' ? 'active' : ''} onClick={() => setTab('tools')}>设备</button>
           <button className={tab === 'dispatch' ? 'active' : ''} onClick={() => setTab('dispatch')}>派单</button>
@@ -199,6 +242,129 @@ export function UI() {
           <button className={tab === 'config' ? 'active' : ''} onClick={() => setTab('config')}>配置</button>
           <button className={tab === 'protocol' ? 'active' : ''} onClick={() => setTab('protocol')}>协议</button>
         </div>
+
+        {tab === 'orders' && (
+          <>
+            <section>
+              <h3>投单台 · 给工作室派活</h3>
+              <p className="note">
+                工单从这儿进队列，下一个节拍由派单台接手：派单 → 模型推理 → 设备小票 → oracle 判定。
+                全过程写进 append-only 日志，刷新页面可回放。
+              </p>
+              <div className="order-form">
+                <label>工单标题</label>
+                <input
+                  value={orderTitle}
+                  onChange={(e) => setOrderTitle(e.target.value)}
+                  placeholder="想让工作室做什么"
+                  maxLength={80}
+                />
+                <label>目标（可选）</label>
+                <textarea
+                  value={orderGoal}
+                  onChange={(e) => setOrderGoal(e.target.value)}
+                  rows={2}
+                  placeholder="留空则使用模板目标"
+                />
+              </div>
+            </section>
+
+            <section>
+              <h3>一键模板 · {orderDesk?.templates.length ?? '…'}</h3>
+              <div className="template-grid">
+                {(orderDesk?.templates ?? []).map((t) => (
+                  <button
+                    key={t.id}
+                    className={'template-chip' + (orderTitle === t.title ? ' active' : '')}
+                    onClick={() => applyTemplate(t)}
+                  >
+                    <b>{t.title}</b>
+                    <small>
+                      {t.criteria.length} 条判据
+                      {t.criteria.some((c) => c.id === 'approved') ? ' · 要签字' : ''}
+                    </small>
+                  </button>
+                ))}
+                {!orderDesk && <p className="empty">连接后读取模板…</p>}
+              </div>
+            </section>
+
+            <section>
+              <h3>验收判据 · {orderCriteria.length} 条</h3>
+              <p className="note">
+                判定不是进度条走满：每条判据都要在日志里找到证据。勾「已签字」会触发老板签字闸口。
+              </p>
+              <div className="crit-checks">
+                {(orderDesk?.criteria ?? []).map((c) => (
+                  <label
+                    key={c.id}
+                    className={'crit-check' + (orderCriteria.includes(c.id) ? ' on' : '')}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={orderCriteria.includes(c.id)}
+                      onChange={() => toggleCriterion(c.id)}
+                    />
+                    <span>{c.label}</span>
+                    <code>{c.id}</code>
+                  </label>
+                ))}
+              </div>
+              <div className="btn-row" style={{ marginTop: 10 }}>
+                <button
+                  className="primary"
+                  disabled={orderBusy || !connected || orderCriteria.length === 0}
+                  onClick={() => void submitOrder()}
+                >
+                  {orderBusy ? '排队中…' : '派给工作室'}
+                </button>
+              </div>
+              {orderError && <p className="error">{orderError}</p>}
+              {orderReceipt && (
+                <div className="order-receipt">
+                  <b>{orderReceipt.taskId} 已入队</b>
+                  <small>
+                    {orderReceipt.title} · 队列位置 {orderReceipt.queuePosition} · {orderReceipt.criteria.length} 条判据
+                  </small>
+                  <div className="btn-row" style={{ marginTop: 8, marginBottom: 0 }}>
+                    <button onClick={() => { setTab('dispatch'); void loadContext(orderReceipt.taskId) }}>
+                      看这张工单
+                    </button>
+                  </div>
+                </div>
+              )}
+            </section>
+
+            <section>
+              <h3>车间节奏</h3>
+              <div className="kv"><span>自动演示投料</span><code>{config?.autoDemo ? '开' : '关'}</code></div>
+              <div className="btn-row">
+                <button onClick={() => void store.updateConfig({ autoDemo: !config?.autoDemo })}>
+                  {config?.autoDemo ? '关掉自动投料' : '打开自动投料'}
+                </button>
+                <button onClick={() => store.sendControl({ action: snapshot?.playing ? 'pause' : 'resume' })}>
+                  {snapshot?.playing ? '暂停车间' : '继续车间'}
+                </button>
+              </div>
+              <p className="note">
+                默认安静车间：只有你投的单才上流水线。打开自动投料会每 8 个节拍补一张演示单。
+              </p>
+            </section>
+
+            <section>
+              <h3>怎么玩</h3>
+              <ol className="howto">
+                <li>选「合规复核」模板 → 派给工作室</li>
+                <li>切到派单台看派单理由、模型请求体、设备小票</li>
+                <li>模型摸到命令终端会弹签字卡：放行才出小票，oracle 才判「通过」</li>
+                <li>驳回或 25 秒不理 → 缺签字 → 工单未通过，日志留痕</li>
+              </ol>
+              <p className="note">
+                也能用 curl：<code>POST /api/orders</code> 投单，<code>GET /api/orders</code> 看参数说明。
+              </p>
+            </section>
+          </>
+        )}
 
         {tab === 'workers' && (
           <>
@@ -244,7 +410,7 @@ export function UI() {
                 </button>
               </div>
               <div className="btn-row">
-                <button disabled={busy} onClick={() => run('turn/start', { title: '人工投料工单' })}>投一个工单</button>
+                <button onClick={() => setTab('orders')}>去投单台</button>
                 <button disabled={busy} onClick={() => run('thread/fork', {})}>老板开支线</button>
               </div>
               {error && <p className="error">{error}</p>}
@@ -507,6 +673,7 @@ export function UI() {
                 <div className="kv"><span>Provider</span><code>{config.modelProvider || '—'}</code></div>
                 <div className="kv"><span>已配 Key</span><code>{config.hasApiKey ? '是' : '否（mock）'}</code></div>
                 <div className="kv"><span>节拍</span><code>{config.tickMs} ms</code></div>
+                <div className="kv"><span>自动演示投料</span><code>{config.autoDemo ? '开' : '关'}</code></div>
                 <div className="kv"><span>调用上限</span><code>{config.maxCallsPerMinute}/min</code></div>
                 <div className="kv"><span>配置目录</span><code className="path">{configHome}</code></div>
                 <div className="btn-row" style={{ marginTop: 10 }}>
@@ -650,16 +817,36 @@ export function UI() {
         <div className="approval-backdrop">
           <div className="approval-card">
             <span className="approval-kicker">服务端主动请求 · approval/request</span>
-            <h2>老板在 {approval.request.stage} 抽查到疑点</h2>
-            <p>{approval.request.note}</p>
-            <p className="approval-meta">
-              工单 {approval.request.taskId || '—'} · 轮次 {approval.request.turnId || '—'}
-              <br />当前轮次已暂停，等待你放行或叫停。
-            </p>
-            <div className="btn-row">
-              <button className="primary" onClick={() => store.replyApproval('allow')}>放行</button>
-              <button className="danger" onClick={() => store.replyApproval('deny')}>叫停</button>
-            </div>
+            {approval.request.kind === 'tool' ? (
+              <>
+                <h2>设备签字 · {approval.request.label || approval.request.toolName}</h2>
+                <p>{approval.request.note}</p>
+                <pre className="approval-args">
+                  {JSON.stringify(approval.request.args ?? {}, null, 2)}
+                </pre>
+                <p className="approval-meta">
+                  工单 {approval.request.taskId || '—'} · 设备 {approval.request.toolName}
+                  <br />当前轮次已暂停；25 秒内没签字会自动驳回，并在日志里留痕。
+                </p>
+                <div className="btn-row">
+                  <button className="primary" onClick={() => store.replyApproval('allow')}>签字放行</button>
+                  <button className="danger" onClick={() => store.replyApproval('deny')}>驳回</button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h2>老板在 {approval.request.stage} 抽查到疑点</h2>
+                <p>{approval.request.note}</p>
+                <p className="approval-meta">
+                  工单 {approval.request.taskId || '—'} · 轮次 {approval.request.turnId || '—'}
+                  <br />当前轮次已暂停，等待你放行或叫停。
+                </p>
+                <div className="btn-row">
+                  <button className="primary" onClick={() => store.replyApproval('allow')}>放行</button>
+                  <button className="danger" onClick={() => store.replyApproval('deny')}>叫停</button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
