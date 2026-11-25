@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { selectSnapshot, useMedusaStore } from '@/lib/store'
+import { AvatarEditor } from './AvatarEditor'
 import { eventDetail, eventLabel } from '@/lib/rpc'
 import type {
   CameraList, DerivedContext, OrderReceipt, OrderTemplate,
@@ -52,6 +53,15 @@ export function UI() {
   const [cameraList, setCameraList] = useState<CameraList | null>(null)
   const [obsBusy, setObsBusy] = useState(false)
   const [obsResult, setObsResult] = useState<string | null>(null)
+
+  // Appearance lives in localStorage, so hydration must wait for the client.
+  // A click in the 3D scene can also ask this panel to switch tabs.
+  useEffect(() => {
+    useMedusaStore.getState().hydrateAppearance()
+  }, [])
+  useEffect(() => {
+    if (store.tabRequest) setTab(store.tabRequest.tab as typeof tab)
+  }, [store.tabRequest])
 
   const maxCursor = Math.max(0, frames.length - 1)
   const recent = frames
@@ -437,7 +447,7 @@ export function UI() {
             </p>
             {tools.length === 0 && <p className="empty">连接后读取设备清单…</p>}
             {tools.map((tool) => (
-              <div className="tool-row" key={tool.name}>
+              <div className={'tool-row' + (store.focusTool === tool.name ? ' focus' : '')} key={tool.name}>
                 <div className="tool-row-head">
                   <b>{tool.label}</b>
                   <span className={'perm-badge ' + tool.permission}>
@@ -614,7 +624,7 @@ export function UI() {
               <h3>机位 · {snapshot?.cameras.length ?? 0}</h3>
               {snapshot?.cameras.length === 0 && <p className="empty">连接后读取机位…</p>}
               {(snapshot?.cameras ?? []).map((cam) => (
-                <button key={cam.id} className="camera-row" onClick={() => void captureNow(cam.id)}>
+                <button key={cam.id} className={'camera-row' + (store.focusCamera === cam.id ? ' focus' : '')} onClick={() => void captureNow(cam.id)}>
                   <div className="camera-row-head">
                     <i className={'rec-dot ' + cam.status} />
                     <b>{cam.label}</b>
@@ -850,6 +860,8 @@ export function UI() {
           </div>
         </div>
       )}
+
+      <AvatarEditor />
     </div>
   )
 }

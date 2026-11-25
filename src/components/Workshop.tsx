@@ -6,9 +6,11 @@ import {
 } from '@react-three/drei'
 import { Bloom, EffectComposer, Vignette } from '@react-three/postprocessing'
 import * as THREE from 'three'
-import { useMemo, useRef } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { selectSnapshot, useMedusaStore } from '@/lib/store'
+import { BOSS_KEY, resolveAvatar, workerKey } from '@/lib/appearance'
+import { Avatar } from './Avatar'
 import type { Boss, CameraView, DispatchRecord, Stage, ToolView, Worker, WorkTask } from '@/lib/contract'
 
 // Deliberately muted: the backend colours are chart accents, not paint. A calm
@@ -35,12 +37,29 @@ const METAL = '#9aa3ad'
 function StagePlatform({ stage, highlighted }: { stage: Stage; highlighted: boolean }) {
   const accent = useMemo(() => soften(stage.color), [stage.color])
   const pool = useMemo(() => soften(stage.color, 0.45, 0.8), [stage.color])
+  const [hovered, setHovered] = useState(false)
+  const requestTab = useMedusaStore((state) => state.requestTab)
   return (
-    <group position={[stage.position.x, stage.position.y, stage.position.z]}>
+    <group
+      position={[stage.position.x, stage.position.y, stage.position.z]}
+      onClick={(event) => {
+        event.stopPropagation()
+        requestTab('workers')
+      }}
+      onPointerOver={(event) => {
+        event.stopPropagation()
+        setHovered(true)
+        document.body.style.cursor = 'pointer'
+      }}
+      onPointerOut={() => {
+        setHovered(false)
+        document.body.style.cursor = 'auto'
+      }}
+    >
       {/* A soft pool of light on the floor ties the station to the ground. */}
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.014, 0]}>
         <circleGeometry args={[2.45, 48]} />
-        <meshBasicMaterial color={pool} transparent opacity={highlighted ? 0.34 : 0.2} depthWrite={false} />
+        <meshBasicMaterial color={pool} transparent opacity={hovered ? 0.4 : highlighted ? 0.34 : 0.2} depthWrite={false} />
       </mesh>
       {/* A recessed plinth, a light top and a thin edge band: three layers
           read as furniture instead of one thick crate. */}
@@ -52,7 +71,7 @@ function StagePlatform({ stage, highlighted }: { stage: Stage; highlighted: bool
       </RoundedBox>
       <mesh position={[0, 0.258, 0]} receiveShadow>
         <boxGeometry args={[3.02, 0.012, 2.2]} />
-        <meshStandardMaterial color={accent} roughness={0.55} transparent opacity={highlighted ? 0.26 : 0.12} />
+        <meshStandardMaterial color={accent} roughness={0.55} transparent opacity={hovered ? 0.34 : highlighted ? 0.26 : 0.12} />
       </mesh>
       {/* Desk dressing: a closed notebook and a mug, so the station reads as
           a place someone works at, not a pedestal. */}
@@ -81,7 +100,11 @@ function StagePlatform({ stage, highlighted }: { stage: Stage; highlighted: bool
         />
       </mesh>
       <Html center zIndexRange={[5, 0]} distanceFactor={14} position={[0, 0.95, -1.05]}>
-        <div className="stage-tag" style={{ '--tag-accent': accent } as CSSProperties}>
+        <div
+          className="stage-tag"
+          style={{ '--tag-accent': accent } as CSSProperties}
+          onClick={() => requestTab('workers')}
+        >
           {stage.name}
         </div>
       </Html>
@@ -104,55 +127,71 @@ function WorkerFigure({
 }) {
   const group = useRef<THREE.Group>(null)
   const halo = useRef<THREE.Mesh>(null)
+  const [hovered, setHovered] = useState(false)
+  const appearance = useMedusaStore((state) => state.appearance)
+  const openAvatarEditor = useMedusaStore((state) => state.openAvatarEditor)
+  const selectWorker = useMedusaStore((state) => state.selectWorker)
+  const editorTarget = useMedusaStore((state) => state.avatarEditor)
+  const isEditing = editorTarget?.kind === 'worker' && editorTarget.id === worker.id
+  const statusColor = STATUS_COLOR[worker.status] ?? STATUS_COLOR.busy
+  const avatar = resolveAvatar(appearance, workerKey(worker.id), statusColor)
+  const color = avatar.effectiveColor
+
   useFrame(({ clock }) => {
     if (!group.current) return
     const t = clock.getElapsedTime()
     const bob = worker.status === 'busy' ? 0.055 : 0.018
-    group.current.position.y = (stage?.position.y ?? 0) + 0.63 + Math.sin(t * 2 + worker.id.length) * bob
+    // Feet land on the desk surface (0.27), not on the old capsule centre.
+    group.current.position.y = (stage?.position.y ?? 0) + 0.85 + Math.sin(t * 2 + worker.id.length) * bob
     group.current.rotation.y = Math.sin(t * 0.6) * 0.16
     if (halo.current) {
       const m = halo.current.material as THREE.MeshBasicMaterial
-      m.opacity = selected ? 0.28 + Math.sin(t * 2.4) * 0.1 : 0
+      m.opacity = isEditing
+        ? 0.42 + Math.sin(t * 2.4) * 0.08
+        : selected ? 0.3 + Math.sin(t * 2.4) * 0.1 : hovered ? 0.2 : 0
     }
   })
-  const color = STATUS_COLOR[worker.status] ?? STATUS_COLOR.busy
+
   return (
-    <group ref={group} position={[(stage?.position.x ?? 0) + offsetX, 0.6, (stage?.position.z ?? 0) - 0.15]}>
-      <mesh castShadow>
-        <capsuleGeometry args={[0.27, 0.48, 8, 20]} />
-        <meshPhysicalMaterial color={color} roughness={0.44} metalness={0.05} clearcoat={0.35} clearcoatRoughness={0.42} />
+    <group
+      ref={group}
+      position={[(stage?.position.x ?? 0) + offsetX, 0.82, (stage?.position.z ?? 0) - 0.15]}
+      onClick={(event) => {
+        event.stopPropagation()
+        selectWorker(worker.id)
+        openAvatarEditor({ kind: 'worker', id: worker.id, name: worker.name, status: worker.status })
+      }}
+      onPointerOver={(event) => {
+        event.stopPropagation()
+        setHovered(true)
+        document.body.style.cursor = 'pointer'
+      }}
+      onPointerOut={() => {
+        setHovered(false)
+        document.body.style.cursor = 'auto'
+      }}
+    >
+      {/* Invisible hit volume: a humanoid has gaps between its limbs, and a
+          click should not disappear into them. */}
+      <mesh position={[0, 0.14, 0]}>
+        <capsuleGeometry args={[0.44, 1.0, 4, 10]} />
+        <meshBasicMaterial transparent opacity={0} depthWrite={false} />
       </mesh>
-      {/* A reflective work band breaks the silhouette so a busy worker does
-          not read as one smooth pill. */}
-      <mesh position={[0, -0.04, 0]} castShadow>
-        <torusGeometry args={[0.272, 0.024, 10, 28]} />
-        <meshStandardMaterial color="#f1f4f8" roughness={0.32} metalness={0.12} />
-      </mesh>
-      <mesh position={[0, 0.66, 0]} castShadow>
-        <sphereGeometry args={[0.245, 24, 18]} />
-        <meshPhysicalMaterial color={color} roughness={0.38} metalness={0.05} clearcoat={0.4} clearcoatRoughness={0.35} />
-      </mesh>
-      {/* A pale visor gives the figure a face without turning it into a toy. */}
-      <mesh position={[0, 0.665, 0.225]} rotation={[0, 0, 0]}>
-        <circleGeometry args={[0.135, 24]} />
-        <meshStandardMaterial color="#f4f6f8" roughness={0.3} metalness={0.15} side={THREE.DoubleSide} />
-      </mesh>
-      {/* Status beacon above the head. */}
-      <mesh position={[0, 0.95, 0]}>
-        <sphereGeometry args={[0.062, 12, 10]} />
-        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={1.3} />
-      </mesh>
-      <RoundedBox args={[0.32, 0.2, 0.26]} radius={0.05} smoothness={3} position={[0.36, 0.02, 0]} castShadow>
-        <meshStandardMaterial color="#eef1f4" roughness={0.7} />
-      </RoundedBox>
-      <mesh ref={halo} rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.5, 0]}>
-        <ringGeometry args={[0.42, 0.66, 40]} />
+      <Avatar model={avatar.model} color={color} scale={avatar.scale} />
+      <mesh ref={halo} rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.56, 0]}>
+        <ringGeometry args={[0.44, 0.68, 40]} />
         <meshBasicMaterial color={color} transparent opacity={0} side={THREE.DoubleSide} depthWrite={false} />
       </mesh>
-      <Html center zIndexRange={[5, 0]} distanceFactor={12} position={[0, 1.32 + labelLift, 0]}>
-        <div className="worker-tag">
+      <Html center zIndexRange={[30, 20]} distanceFactor={12} position={[0, 1.34 + labelLift, 0]}>
+        <div
+          className="worker-tag"
+          onClick={() => {
+            selectWorker(worker.id)
+            openAvatarEditor({ kind: 'worker', id: worker.id, name: worker.name, status: worker.status })
+          }}
+        >
           <i className="tag-dot" style={{ background: color }} />
-          {worker.name} · {worker.status}
+          {avatar.label || worker.name} · {worker.status}
         </div>
       </Html>
     </group>
@@ -191,44 +230,59 @@ function BossFigure({ boss }: { boss: Boss }) {
   const group = useRef<THREE.Group>(null)
   const targetX = useRef(boss.x)
   targetX.current = boss.x
-  useFrame(() => {
-    if (!group.current) return
-    group.current.position.x += (targetX.current - group.current.position.x) * 0.09
-    group.current.rotation.y = Math.sin(targetX.current) * 0.2
-  })
-  const color = boss.mode === 'intervene'
+  const [hovered, setHovered] = useState(false)
+  const appearance = useMedusaStore((state) => state.appearance)
+  const openAvatarEditor = useMedusaStore((state) => state.openAvatarEditor)
+  const editorTarget = useMedusaStore((state) => state.avatarEditor)
+  const isEditing = editorTarget?.kind === 'boss'
+  const modeColor = boss.mode === 'intervene'
     ? '#b8615c'
     : boss.mode === 'inspect'
       ? '#b58a4c'
       : boss.mode === 'dispatch'
         ? '#5f9380'
         : '#6e6e92'
+  const avatar = resolveAvatar(appearance, BOSS_KEY, modeColor)
+  const color = avatar.effectiveColor
+
+  useFrame(() => {
+    if (!group.current) return
+    group.current.position.x += (targetX.current - group.current.position.x) * 0.09
+    group.current.rotation.y = Math.sin(targetX.current) * 0.2
+  })
+
   return (
-    <group ref={group} position={[boss.x, 0, boss.z]}>
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.012, 0]}>
-        <circleGeometry args={[0.72, 40]} />
-        <meshBasicMaterial color={color} transparent opacity={0.14} depthWrite={false} />
+    <group
+      ref={group}
+      position={[boss.x, 0.56, boss.z]}
+      onClick={(event) => {
+        event.stopPropagation()
+        openAvatarEditor({ kind: 'boss', name: '老板', status: boss.mode })
+      }}
+      onPointerOver={(event) => {
+        event.stopPropagation()
+        setHovered(true)
+        document.body.style.cursor = 'pointer'
+      }}
+      onPointerOut={() => {
+        setHovered(false)
+        document.body.style.cursor = 'auto'
+      }}
+    >
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.55, 0]}>
+        <circleGeometry args={[0.78, 40]} />
+        <meshBasicMaterial color={color} transparent opacity={hovered || isEditing ? 0.28 : 0.14} depthWrite={false} />
       </mesh>
-      <mesh castShadow position={[0, 0.52, 0]}>
-        <capsuleGeometry args={[0.31, 0.6, 8, 20]} />
-        <meshStandardMaterial color={color} roughness={0.5} metalness={0.12} />
+      <mesh position={[0, 0.1, 0]}>
+        <capsuleGeometry args={[0.5, 0.95, 4, 10]} />
+        <meshBasicMaterial transparent opacity={0} depthWrite={false} />
       </mesh>
-      <mesh position={[0, 1.16, 0]} castShadow>
-        <sphereGeometry args={[0.28, 24, 18]} />
-        <meshStandardMaterial color={color} roughness={0.42} metalness={0.08} />
-      </mesh>
-      {/* The hat is the one detail that still says "boss". */}
-      {/* A narrower brim: from the overhead camera a wide one hid the body. */}
-      <mesh position={[0, 1.4, 0]} castShadow>
-        <cylinderGeometry args={[0.33, 0.33, 0.07, 24]} />
-        <meshStandardMaterial color="#3f4450" roughness={0.55} metalness={0.2} />
-      </mesh>
-      <mesh position={[0, 1.5, 0]} castShadow>
-        <cylinderGeometry args={[0.24, 0.26, 0.15, 24]} />
-        <meshStandardMaterial color="#3f4450" roughness={0.55} metalness={0.2} />
-      </mesh>
-      <Html center zIndexRange={[5, 0]} distanceFactor={12} position={[0, 2.15, 0]}>
-        <div className={`boss-tag ${boss.mode}`}>老板 · {boss.note || boss.mode}</div>
+      <Avatar model={avatar.model} color={color} boss scale={avatar.scale * 1.12} />
+      <Html center zIndexRange={[32, 22]} distanceFactor={12} position={[0, 1.52, 0]}>
+        <div
+          className={`boss-tag ${boss.mode}`}
+          onClick={() => openAvatarEditor({ kind: 'boss', name: '老板', status: boss.mode })}
+        >{avatar.label || '老板'} · {boss.note || boss.mode}</div>
       </Html>
     </group>
   )
@@ -270,12 +324,35 @@ function Conveyor() {
 }
 
 function ToolDevice({ tool, x, recent }: { tool: ToolView; x: number; recent: boolean }) {
+  const [hovered, setHovered] = useState(false)
+  const focusOnTool = useMedusaStore((state) => state.focusOnTool)
+  const requestTab = useMedusaStore((state) => state.requestTab)
   const color = recent ? '#5f9380' : tool.permission === 'approval' ? '#b58a4c' : '#9aa5b1'
   const screen = recent ? '#c8ecd9' : '#e5ebf1'
   const showReceipt = recent && Boolean(tool.lastReceipt)
   const receipt = tool.lastReceipt.length > 14 ? tool.lastReceipt.slice(0, 13) + '…' : tool.lastReceipt
   return (
-    <group position={[x, 0.38, 0.95]}>
+    <group
+      position={[x, 0.38, 0.95]}
+      onClick={(event) => {
+        event.stopPropagation()
+        focusOnTool(tool.name)
+        requestTab('tools')
+      }}
+      onPointerOver={(event) => {
+        event.stopPropagation()
+        setHovered(true)
+        document.body.style.cursor = 'pointer'
+      }}
+      onPointerOut={() => {
+        setHovered(false)
+        document.body.style.cursor = 'auto'
+      }}
+    >
+      <mesh position={[0, 0.1, 0]}>
+        <boxGeometry args={[0.72, 0.82, 0.62]} />
+        <meshBasicMaterial transparent opacity={0} depthWrite={false} />
+      </mesh>
       <RoundedBox args={[0.5, 0.44, 0.38]} radius={0.055} smoothness={3} castShadow>
         <meshStandardMaterial color={color} roughness={0.5} metalness={0.18} />
       </RoundedBox>
@@ -309,13 +386,17 @@ function ToolDevice({ tool, x, recent }: { tool: ToolView; x: number; recent: bo
         </div>
       </Html>
       <Html center zIndexRange={[5, 0]} distanceFactor={18} position={[0, -0.36, 0]}>
-        <div className={'tool-tag' + (recent ? ' active' : '')}>{tool.label}</div>
+        <div
+          className={'tool-tag' + (recent ? ' active' : '') + (hovered ? ' hover' : '')}
+          onClick={() => { focusOnTool(tool.name); requestTab('tools') }}
+        >{tool.label}</div>
       </Html>
     </group>
   )
 }
 
 function DispatchBoard({ record }: { record?: DispatchRecord }) {
+  const requestTab = useMedusaStore((state) => state.requestTab)
   return (
     <group position={[0, 0, -3.3]}>
       {/* A plinth so the big screen stands on the floor instead of floating. */}
@@ -346,7 +427,7 @@ function DispatchBoard({ record }: { record?: DispatchRecord }) {
         </mesh>
       ))}
       <Html center zIndexRange={[5, 0]} distanceFactor={22} position={[0, 2.25, 0.13]}>
-        <div className="dispatch-board">
+        <div className="dispatch-board" onClick={() => requestTab('dispatch')}>
           <span>派单台 / DISPATCH</span>
           <b>{record ? `${record.taskId} → ${record.stageId}` : '待命中'}</b>
           <small>{record ? `${record.workerName} · ${record.score.toFixed(2)}` : '等待新工单'}</small>
@@ -358,6 +439,9 @@ function DispatchBoard({ record }: { record?: DispatchRecord }) {
 
 function CameraRig({ camera }: { camera: CameraView }) {
   const lamp = useRef<THREE.Mesh>(null)
+  const [hovered, setHovered] = useState(false)
+  const focusOnCamera = useMedusaStore((state) => state.focusOnCamera)
+  const requestTab = useMedusaStore((state) => state.requestTab)
   useFrame(({ clock }) => {
     if (!lamp.current) return
     const mat = lamp.current.material as THREE.MeshStandardMaterial
@@ -376,7 +460,27 @@ function CameraRig({ camera }: { camera: CameraView }) {
       ? [0, 0, -0.3]
       : [-0.34, 0, 0]
   return (
-    <group position={[camera.position.x, camera.position.y, camera.position.z]}>
+    <group
+      position={[camera.position.x, camera.position.y, camera.position.z]}
+      onClick={(event) => {
+        event.stopPropagation()
+        focusOnCamera(camera.id)
+        requestTab('observe')
+      }}
+      onPointerOver={(event) => {
+        event.stopPropagation()
+        setHovered(true)
+        document.body.style.cursor = 'pointer'
+      }}
+      onPointerOut={() => {
+        setHovered(false)
+        document.body.style.cursor = 'auto'
+      }}
+    >
+      <mesh position={[0, 0.5, 0]}>
+        <boxGeometry args={[0.9, 1.5, 0.9]} />
+        <meshBasicMaterial transparent opacity={0} depthWrite={false} />
+      </mesh>
       <mesh position={[0, 0.9, 0]}>
         <cylinderGeometry args={[0.03, 0.03, 1.8, 8]} />
         <meshStandardMaterial color={METAL} metalness={0.6} roughness={0.4} />
@@ -398,7 +502,8 @@ function CameraRig({ camera }: { camera: CameraView }) {
       </mesh>
       {/* A translucent cone: what this viewpoint can see. It is a hint, not
           a real frustum — the actual record is the append-only log. */}
-      <mesh position={[0, -1.75, 0]} rotation={tilt}>
+      {/* The cone is decoration: it must not swallow clicks on the floor. */}
+      <mesh position={[0, -1.75, 0]} rotation={tilt} raycast={() => {}}>
         <coneGeometry args={[1.45, 3.5, 24, 1, true]} />
         <meshBasicMaterial
           color={alert ? '#c0625d' : '#7f8ad6'}
@@ -409,7 +514,10 @@ function CameraRig({ camera }: { camera: CameraView }) {
         />
       </mesh>
       <Html center zIndexRange={[5, 0]} distanceFactor={20} position={[0, 0.7, 0]}>
-        <div className={'camera-tag' + (alert ? ' alert' : '')}>
+        <div
+          className={'camera-tag' + (alert ? ' alert' : '') + (hovered ? ' hover' : '')}
+          onClick={() => { focusOnCamera(camera.id); requestTab('observe') }}
+        >
           <span className="cam-rec" />{camera.label} · {alert ? '盲区' : 'REC'}
         </div>
       </Html>
@@ -599,9 +707,20 @@ function Scene() {
 }
 
 export default function Workshop() {
+  const closeAvatarEditor = useMedusaStore((state) => state.closeAvatarEditor)
   return (
     <Canvas
       shadows
+      onPointerMissed={(event) => {
+        // drei Html labels live outside the canvas but still bubble into
+        // R3F's pointer handling. A click on one of them is a real
+        // interaction, not a "miss" that should close the inspector.
+        const target = event.target as HTMLElement | null
+        if (target?.closest?.(
+          '.worker-tag, .boss-tag, .stage-tag, .tool-tag, .camera-tag, .dispatch-board, .avatar-card',
+        )) return
+        closeAvatarEditor()
+      }}
       camera={{ position: [0, 10.8, 19.3], fov: 47.5 }}
       dpr={[1, 2]}
       gl={{ antialias: false, alpha: true, toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.02 }}

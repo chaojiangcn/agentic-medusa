@@ -26,6 +26,9 @@ button { cursor: pointer; }
 .app { position: relative; width: 100%; height: 100%; }
 .canvas-layer {
   position: absolute; inset: 0;
+  /* Own stacking context: 3D labels can rank among themselves without ever
+     climbing above the side panels. */
+  z-index: 1; isolation: isolate;
   /* A soft ceiling glow: the 3D floor fades into the same value, so the scene
      has depth instead of a flat sky. */
   background:
@@ -650,3 +653,94 @@ button { cursor: pointer; }
 .dispatch-board small { color: #93aecd; }
 .cam-rec { background: var(--bad); animation: rec-pulse 1.8s ease-in-out infinite; }
 @keyframes rec-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+/* --- Click-to-edit inspector for 3D characters --- */
+.avatar-card {
+  position: absolute;
+  left: 288px; top: 68px;
+  width: 298px;
+  max-height: calc(100vh - 152px);
+  overflow: auto;
+  z-index: 15;
+  padding: 14px;
+  background: rgba(253, 254, 255, 0.9);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  border: 1px solid var(--glass-line);
+  border-radius: 16px;
+  box-shadow: 0 18px 48px rgba(38, 52, 70, 0.2), 0 2px 6px rgba(38, 52, 70, 0.08);
+  animation: avatar-in 180ms ease-out;
+}
+@keyframes avatar-in {
+  from { opacity: 0; transform: translateY(-8px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+.avatar-card::-webkit-scrollbar { width: 6px; }
+.avatar-card::-webkit-scrollbar-thumb { background: rgba(150, 165, 183, 0.42); border-radius: 4px; }
+
+.avatar-head { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 13px; }
+.avatar-head > div { flex: 1; min-width: 0; }
+.avatar-kicker { display: block; font-size: 10px; letter-spacing: 0.08em; color: var(--text-3); }
+.avatar-head h2 { font-size: 15px; margin: 3px 0; letter-spacing: -0.3px; }
+.avatar-head small { font-size: 10px; color: var(--text-3); line-height: 1.5; }
+.avatar-x { border: none; background: transparent; font-size: 20px; line-height: 1; color: var(--text-3); padding: 0 3px; }
+.avatar-x:hover { color: var(--text); }
+
+.avatar-section { margin-bottom: 13px; }
+.avatar-section > label { display: block; font-size: 11px; font-weight: 600; color: var(--text-2); margin-bottom: 7px; }
+.avatar-section > label em { font-style: normal; font-weight: 400; color: var(--text-3); }
+.avatar-section > label code { font-family: var(--mono); font-size: 10px; color: var(--accent); }
+
+.avatar-models { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.avatar-model {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 8px 3px 7px;
+  border-radius: 10px;
+  border: 1px solid var(--glass-line);
+  background: rgba(255, 255, 255, 0.7);
+  color: var(--text-2);
+  transition: border-color 160ms ease, transform 160ms ease, background 160ms ease;
+}
+.avatar-model svg { color: #7f8ba0; }
+.avatar-model b { font-size: 10.5px; font-weight: 600; }
+.avatar-model small { font-size: 9px; color: var(--text-3); line-height: 1.3; text-align: center; }
+.avatar-model:hover { border-color: rgba(99, 104, 180, 0.55); transform: translateY(-1px); }
+.avatar-model.on { background: var(--accent-soft); border-color: rgba(99, 104, 180, 0.6); color: var(--accent); }
+.avatar-model.on svg { color: var(--accent); }
+
+.avatar-glb { display: flex; gap: 5px; margin-top: 7px; }
+.avatar-glb input, .avatar-input {
+  flex: 1; min-width: 0; font-size: 11px; padding: 6px 8px;
+  border: 1px solid var(--glass-line); border-radius: 8px;
+  background: rgba(255, 255, 255, 0.8); color: var(--text);
+}
+.avatar-glb button { flex: 0 0 auto; font-size: 11px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--glass-line); background: rgba(255, 255, 255, 0.8); }
+.avatar-hint { font-size: 9.5px; color: var(--text-3); line-height: 1.5; margin: 6px 0 0; }
+.avatar-hint code { font-family: var(--mono); }
+
+.avatar-swatches { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.avatar-swatch { width: 22px; height: 22px; border-radius: 7px; border: 2px solid transparent; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12); transition: transform 160ms ease; }
+.avatar-swatch.on { border-color: var(--text); transform: scale(1.1); }
+.avatar-follow { font-size: 10px; padding: 4px 8px; border-radius: 7px; border: 1px solid var(--glass-line); background: rgba(255, 255, 255, 0.8); color: var(--text-2); }
+.avatar-follow.on { background: var(--accent-soft); border-color: rgba(99, 104, 180, 0.6); color: var(--accent); }
+
+.avatar-range { width: 100%; accent-color: var(--accent); }
+.avatar-actions { display: flex; gap: 6px; margin-top: 4px; }
+.avatar-actions button { flex: 1; font-size: 10.5px; padding: 7px 4px; border-radius: 8px; border: 1px solid var(--glass-line); background: rgba(255, 255, 255, 0.8); }
+.avatar-actions button.primary { background: linear-gradient(180deg, #7176c2, #5b60ab); color: #fff; border-color: transparent; }
+.avatar-foot { font-size: 9.5px; color: var(--text-3); text-align: center; margin: 9px 0 0; }
+
+/* 3D labels are inert by default so they do not block raycasts. The ones
+   with real actions opt back in — DOM clicks are more reliable than a ray. */
+.worker-tag, .boss-tag, .stage-tag, .tool-tag, .camera-tag, .dispatch-board {
+  pointer-events: auto;
+  cursor: pointer;
+}
+.worker-tag:hover, .boss-tag:hover, .stage-tag:hover,
+.tool-tag:hover, .camera-tag:hover, .dispatch-board:hover {
+  border-color: rgba(99, 104, 180, 0.7);
+  box-shadow: 0 4px 14px rgba(58, 74, 96, 0.18);
+}
+
+.tool-row.focus, .camera-row.focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(99, 104, 180, 0.18); }
+.tool-tag.hover, .camera-tag.hover { border-color: rgba(99, 104, 180, 0.7); box-shadow: 0 4px 14px rgba(58, 74, 96, 0.18); }

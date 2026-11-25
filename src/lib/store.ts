@@ -16,6 +16,8 @@ import type {
   ThreadInfo,
 } from './contract'
 import { approvalParams, RpcClient } from './rpc'
+import { ALL_KEY, APPEARANCE_STORAGE_KEY } from './appearance'
+import type { AvatarConfig, AvatarTarget } from './appearance'
 
 const MAX_FRAMES = 600
 
@@ -46,6 +48,14 @@ function snapshotFrame(snap: Snapshot): Frame {
 
 let client: RpcClient | null = null
 
+function persistAppearance(appearance: Record<string, Partial<AvatarConfig>>) {
+  try {
+    localStorage.setItem(APPEARANCE_STORAGE_KEY, JSON.stringify(appearance))
+  } catch {
+    // Private mode / quota: the session still works, it just does not persist.
+  }
+}
+
 interface MedusaState {
   frames: Frame[]
   cursor: number
@@ -62,6 +72,14 @@ interface MedusaState {
   activeThread: string
   protocolVersion: string
   configHome: string
+  /** UI-local appearance: never sent to the App Server. */
+  appearance: Record<string, Partial<AvatarConfig>>
+  avatarEditor: AvatarTarget | null
+  /** Clicking a device or camera in 3D asks the panel to focus that tab. */
+  focusTool: string | null
+  focusCamera: string | null
+  /** A 3D click can ask the side panel to switch tabs. */
+  tabRequest: { tab: string; seq: number } | null
   connect: () => void
   setCursor: (index: number) => void
   setPlaying: (value: boolean) => void
@@ -71,6 +89,15 @@ interface MedusaState {
   replyApproval: (decision: 'allow' | 'deny') => void
   call: <T = unknown>(method: string, params?: unknown) => Promise<T>
   updateConfig: (patch: Record<string, unknown>) => Promise<void>
+  hydrateAppearance: () => void
+  setAvatar: (key: string, patch: Partial<AvatarConfig>) => void
+  applyAvatarToAll: (config: AvatarConfig) => void
+  resetAppearance: () => void
+  openAvatarEditor: (target: AvatarTarget) => void
+  closeAvatarEditor: () => void
+  focusOnTool: (name: string) => void
+  focusOnCamera: (id: string) => void
+  requestTab: (tab: string) => void
 }
 
 export const selectSnapshot = (state: MedusaState) =>
@@ -91,6 +118,11 @@ export const useMedusaStore = create<MedusaState>((set, get) => ({
   activeThread: 'main',
   protocolVersion: '—',
   configHome: '—',
+  appearance: {},
+  avatarEditor: null,
+  focusTool: null,
+  focusCamera: null,
+  tabRequest: null,
 
   connect: () => {
     if (client) return
@@ -218,6 +250,47 @@ export const useMedusaStore = create<MedusaState>((set, get) => ({
   setSpeed: (value) => set({ speed: value }),
 
   selectWorker: (id) => set({ selectedWorkerId: id }),
+
+  hydrateAppearance: () => {
+    try {
+      const raw = localStorage.getItem(APPEARANCE_STORAGE_KEY)
+      if (!raw) return
+      const parsed = JSON.parse(raw) as Record<string, Partial<AvatarConfig>>
+      if (parsed && typeof parsed === 'object') set({ appearance: parsed })
+    } catch {
+      // A corrupt value simply falls back to defaults.
+    }
+  },
+
+  setAvatar: (key, patch) =>
+    set((state) => {
+      const next = {
+        ...state.appearance,
+        [key]: { ...(state.appearance[key] ?? {}), ...patch },
+      }
+      persistAppearance(next)
+      return { appearance: next }
+    }),
+
+  applyAvatarToAll: (config) => {
+    // Drop per-target overrides, otherwise "apply to all" would look broken.
+    persistAppearance({ [ALL_KEY]: config })
+    set({ appearance: { [ALL_KEY]: config } })
+  },
+
+  resetAppearance: () => {
+    persistAppearance({})
+    set({ appearance: {} })
+  },
+
+  openAvatarEditor: (target) => set({ avatarEditor: target }),
+  closeAvatarEditor: () => set({ avatarEditor: null }),
+  focusOnTool: (name) => set({ focusTool: name }),
+  focusOnCamera: (id) => set({ focusCamera: id }),
+  requestTab: (tab) =>
+    set((state) => ({
+      tabRequest: { tab, seq: (state.tabRequest?.seq ?? 0) + 1 },
+    })),
 
   sendControl: async (command) => {
     if (command.action === 'pause') set({ playing: false })
