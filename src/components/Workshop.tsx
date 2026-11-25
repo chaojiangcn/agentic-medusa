@@ -1,24 +1,27 @@
 'use client'
 
-import { Canvas, useFrame } from '@react-three/fiber'
+import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import {
   ContactShadows, Environment, Grid, Html, Lightformer, OrbitControls, RoundedBox,
 } from '@react-three/drei'
 import { Bloom, EffectComposer, Vignette } from '@react-three/postprocessing'
 import * as THREE from 'three'
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { selectSnapshot, useMedusaStore } from '@/lib/store'
 import { BOSS_KEY, resolveAvatar, workerKey } from '@/lib/appearance'
 import { Avatar } from './Avatar'
+import {
+  Cabinet, DeskSetup, OfficeChair, RoomShell, WallClock,
+} from './OfficeSet'
 import type { Boss, CameraView, DispatchRecord, Stage, ToolView, Worker, WorkTask } from '@/lib/contract'
 
 // Deliberately muted: the backend colours are chart accents, not paint. A calm
 // low-saturation palette is what makes a scene read as an office rather than
 // a dashboard that happens to be 3D.
 const STATUS_COLOR: Record<string, string> = {
-  busy: '#7b84d2',
-  idle: '#9aa6b4',
+  busy: '#8b95e0',
+  idle: '#a6b2c0',
   blocked: '#d4746f',
   paused: '#c9a05e',
 }
@@ -31,7 +34,7 @@ function soften(hex: string, saturation = 0.4, lightness = 0.66): string {
   return `#${c.getHexString()}`
 }
 
-const SURFACE = '#fbfcfd'
+const SURFACE = '#e3d3bb'
 const METAL = '#9aa3ad'
 
 function StagePlatform({ stage, highlighted }: { stage: Stage; highlighted: boolean }) {
@@ -58,40 +61,31 @@ function StagePlatform({ stage, highlighted }: { stage: Stage; highlighted: bool
     >
       {/* A soft pool of light on the floor ties the station to the ground. */}
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.014, 0]}>
-        <circleGeometry args={[2.45, 48]} />
+        <circleGeometry args={[2.0, 48]} />
         <meshBasicMaterial color={pool} transparent opacity={hovered ? 0.4 : highlighted ? 0.34 : 0.2} depthWrite={false} />
       </mesh>
       {/* A recessed plinth, a light top and a thin edge band: three layers
           read as furniture instead of one thick crate. */}
-      <RoundedBox args={[3.06, 0.06, 2.26]} radius={0.03} smoothness={3} position={[0, 0.03, 0]} castShadow receiveShadow>
+      <mesh position={[0, 0.028, 0]}>
+        <boxGeometry args={[2.86, 0.055, 2.16]} />
+        <meshStandardMaterial color="#a98f6d" roughness={0.88} />
+      </mesh>
+      <RoundedBox args={[2.62, 0.05, 1.94]} radius={0.016} smoothness={3} position={[0, 0.025, 0]} castShadow receiveShadow>
         <meshStandardMaterial color="#9dabbc" roughness={0.85} metalness={0.05} />
       </RoundedBox>
-      <RoundedBox args={[3.24, 0.2, 2.44]} radius={0.07} smoothness={4} position={[0, 0.155, 0]} castShadow receiveShadow>
+      <RoundedBox name="stage-top" args={[2.8, 0.12, 2.1]} radius={0.035} smoothness={4} position={[0, 0.115, 0]} castShadow receiveShadow>
         <meshStandardMaterial color={SURFACE} roughness={0.62} metalness={0.04} />
       </RoundedBox>
-      <mesh position={[0, 0.258, 0]} receiveShadow>
-        <boxGeometry args={[3.02, 0.012, 2.2]} />
+      <mesh position={[0, 0.132, 0]} receiveShadow>
+        <boxGeometry args={[2.58, 0.01, 1.88]} />
         <meshStandardMaterial color={accent} roughness={0.55} transparent opacity={hovered ? 0.34 : highlighted ? 0.26 : 0.12} />
       </mesh>
-      {/* Desk dressing: a closed notebook and a mug, so the station reads as
-          a place someone works at, not a pedestal. */}
-      <group position={[1.16, 0.268, 0.62]}>
-        <mesh castShadow receiveShadow>
-          <boxGeometry args={[0.34, 0.026, 0.24]} />
-          <meshStandardMaterial color="#e3e8ee" roughness={0.7} />
-        </mesh>
-        <mesh position={[0, 0.014, 0]}>
-          <boxGeometry args={[0.3, 0.004, 0.05]} />
-          <meshStandardMaterial color={accent} roughness={0.6} />
-        </mesh>
-      </group>
-      <mesh position={[1.24, 0.3, -0.58]} castShadow receiveShadow>
-        <cylinderGeometry args={[0.062, 0.052, 0.13, 18]} />
-        <meshStandardMaterial color="#f2f4f7" roughness={0.42} metalness={0.06} />
-      </mesh>
+      {/* Desk dressing: monitor, keyboard, notes, lamp. A station has to look
+          like a place someone works at, not a pedestal. */}
+      <DeskSetup accent={accent} />
       {/* Front edge light: the only emissive strip, so Bloom has a reason. */}
-      <mesh position={[0, 0.062, 1.223]}>
-        <boxGeometry args={[2.94, 0.022, 0.014]} />
+      <mesh position={[0, 0.045, 1.053]}>
+        <boxGeometry args={[2.5, 0.022, 0.014]} />
         <meshStandardMaterial
           color={accent}
           emissive={accent}
@@ -99,7 +93,10 @@ function StagePlatform({ stage, highlighted }: { stage: Stage; highlighted: bool
           roughness={0.4}
         />
       </mesh>
-      <Html center zIndexRange={[5, 0]} distanceFactor={14} position={[0, 0.95, -1.05]}>
+      {/* A nameplate on the front edge, not a floating sign behind the desk.
+          At y=0.95 / z=-1.05 this label projected straight onto the worker's
+          face at any camera distance. */}
+      <Html center zIndexRange={[5, 0]} position={[0, 0.2, 1.12]}>
         <div
           className="stage-tag"
           style={{ '--tag-accent': accent } as CSSProperties}
@@ -140,9 +137,9 @@ function WorkerFigure({
   useFrame(({ clock }) => {
     if (!group.current) return
     const t = clock.getElapsedTime()
-    const bob = worker.status === 'busy' ? 0.055 : 0.018
+    const bob = worker.status === 'busy' ? 0.022 : 0.01
     // Feet land on the desk surface (0.27), not on the old capsule centre.
-    group.current.position.y = (stage?.position.y ?? 0) + 0.85 + Math.sin(t * 2 + worker.id.length) * bob
+    group.current.position.y = (stage?.position.y ?? 0) + 0.832 + Math.sin(t * 2 + worker.id.length) * bob
     group.current.rotation.y = Math.sin(t * 0.6) * 0.16
     if (halo.current) {
       const m = halo.current.material as THREE.MeshBasicMaterial
@@ -182,9 +179,10 @@ function WorkerFigure({
         <ringGeometry args={[0.44, 0.68, 40]} />
         <meshBasicMaterial color={color} transparent opacity={0} side={THREE.DoubleSide} depthWrite={false} />
       </mesh>
-      <Html center zIndexRange={[30, 20]} distanceFactor={12} position={[0, 1.34 + labelLift, 0]}>
+      <Html center zIndexRange={[30, 20]} position={[0, 1.72 + labelLift, 0]}>
         <div
           className="worker-tag"
+          style={{ position: 'relative', top: '-30px' }}
           onClick={() => {
             selectWorker(worker.id)
             openAvatarEditor({ kind: 'worker', id: worker.id, name: worker.name, status: worker.status })
@@ -202,12 +200,19 @@ function WorkerFigure({
 /// unmount a crate's Html label when the order list shifts.
 const CRATE_SLOTS = 10
 
-function TaskCrate({ task, offset }: { task: WorkTask | null; offset: number }) {
+/// Stages arrive on a 10-unit span, which forces the camera so far back that a
+/// 1.3 m character ends up 50 px tall. Narrowing the span on the client keeps
+/// the log authoritative while giving the camera a desk-sized room to work in.
+const STAGE_SPREAD = 0.6
+const SPACING = 5 * STAGE_SPREAD
+
+function TaskCrate({ task, offset, stages }: { task: WorkTask | null; offset: number; stages: Stage[] }) {
   // The slot is permanent; only its contents change. Dropping the group (or
   // keying it by task id) unmounts a drei Html root mid-render, which trips
   // React's sync-unmount guard every time an order leaves the floor.
   const done = !task || task.status === 'done' || task.status === 'failed'
-  const x = task ? -6 + (task.stageIndex + task.progress) * 4 : -6
+  const base = stages[Math.min(task?.stageIndex ?? 0, stages.length - 1)]?.position.x ?? 0
+  const x = task ? base + task.progress * SPACING : stages[0]?.position.x ?? 0
   const failed = task?.status === 'failed'
   const color = failed ? '#cf6f6b' : '#6a86a8'
   return (
@@ -219,7 +224,7 @@ function TaskCrate({ task, offset }: { task: WorkTask | null; offset: number }) 
         <boxGeometry args={[0.3, 0.012, 0.02]} />
         <meshStandardMaterial color="#e8eef4" roughness={0.5} />
       </mesh>
-      <Html center zIndexRange={[5, 0]} distanceFactor={18} position={[0, 0.52, 0]}>
+      <Html center zIndexRange={[5, 0]} position={[0, 0.52, 0]}>
         <div className="task-tag" style={{ opacity: done ? 0 : 1 }}>{task?.id ?? ''}</div>
       </Html>
     </group>
@@ -254,7 +259,7 @@ function BossFigure({ boss }: { boss: Boss }) {
   return (
     <group
       ref={group}
-      position={[boss.x, 0.56, boss.z]}
+      position={[boss.x, 0.56, boss.z * 0.8]}
       onClick={(event) => {
         event.stopPropagation()
         openAvatarEditor({ kind: 'boss', name: '老板', status: boss.mode })
@@ -278,7 +283,7 @@ function BossFigure({ boss }: { boss: Boss }) {
         <meshBasicMaterial transparent opacity={0} depthWrite={false} />
       </mesh>
       <Avatar model={avatar.model} color={color} boss scale={avatar.scale * 1.12} />
-      <Html center zIndexRange={[32, 22]} distanceFactor={12} position={[0, 1.52, 0]}>
+      <Html center zIndexRange={[32, 22]} position={[0, 1.86, 0]}>
         <div
           className={`boss-tag ${boss.mode}`}
           onClick={() => openAvatarEditor({ kind: 'boss', name: '老板', status: boss.mode })}
@@ -297,16 +302,16 @@ function Conveyor() {
   })
   return (
     <group position={[0, 0.15, 3.2]}>
-      <RoundedBox args={[15, 0.3, 1.5]} radius={0.09} smoothness={3} receiveShadow castShadow>
+      <RoundedBox args={[11, 0.3, 1.4]} radius={0.09} smoothness={3} receiveShadow castShadow>
         <meshStandardMaterial color="#d5dce3" roughness={0.78} metalness={0.06} />
       </RoundedBox>
       <mesh position={[0, 0.158, 0]}>
-        <boxGeometry args={[14.5, 0.016, 1.3]} />
+        <boxGeometry args={[10.5, 0.016, 1.2]} />
         <meshStandardMaterial color="#b9c4cf" roughness={0.6} metalness={0.12} />
       </mesh>
       <group ref={stripes}>
-        {Array.from({ length: 17 }, (_, i) => (
-          <mesh key={i} position={[-8 + i, 0.17, 0]}>
+        {Array.from({ length: 13 }, (_, i) => (
+          <mesh key={i} position={[-6 + i, 0.17, 0]}>
             <boxGeometry args={[0.045, 0.012, 1.22]} />
             <meshStandardMaterial color="#f4f7fa" roughness={0.8} />
           </mesh>
@@ -333,7 +338,7 @@ function ToolDevice({ tool, x, recent }: { tool: ToolView; x: number; recent: bo
   const receipt = tool.lastReceipt.length > 14 ? tool.lastReceipt.slice(0, 13) + '…' : tool.lastReceipt
   return (
     <group
-      position={[x, 0.38, 0.95]}
+      position={[x, 0.24, 0.95]}
       onClick={(event) => {
         event.stopPropagation()
         focusOnTool(tool.name)
@@ -380,12 +385,12 @@ function ToolDevice({ tool, x, recent }: { tool: ToolView; x: number; recent: bo
       {/* The receipt label stays mounted on purpose: drei's Html unmounts its
           React root synchronously, which trips React's "unmount while
           rendering" guard when it happens on a snapshot update. Fade it. */}
-      <Html center zIndexRange={[5, 0]} distanceFactor={16} position={[0, 0.82, 0]}>
+      <Html center zIndexRange={[5, 0]} position={[0, 0.82, 0]}>
         <div className="tool-receipt" style={{ opacity: showReceipt ? 1 : 0 }}>
           {showReceipt ? receipt : ''}
         </div>
       </Html>
-      <Html center zIndexRange={[5, 0]} distanceFactor={18} position={[0, -0.36, 0]}>
+      <Html center zIndexRange={[5, 0]} position={[0, -0.36, 0]}>
         <div
           className={'tool-tag' + (recent ? ' active' : '') + (hovered ? ' hover' : '')}
           onClick={() => { focusOnTool(tool.name); requestTab('tools') }}
@@ -400,10 +405,10 @@ function DispatchBoard({ record }: { record?: DispatchRecord }) {
   return (
     <group position={[0, 0, -3.3]}>
       {/* A plinth so the big screen stands on the floor instead of floating. */}
-      <RoundedBox args={[2.9, 0.12, 0.72]} radius={0.05} smoothness={3} position={[0, 0.06, 0]} castShadow receiveShadow>
+      <RoundedBox args={[2.9, 0.12, 0.72]} radius={0.035} smoothness={3} position={[0, 0.06, 0]} castShadow receiveShadow>
         <meshStandardMaterial color="#a7b4c3" roughness={0.72} metalness={0.12} />
       </RoundedBox>
-      <RoundedBox args={[3.7, 1.2, 0.16]} radius={0.09} smoothness={4} position={[0, 2.25, 0]} castShadow>
+      <RoundedBox args={[3.7, 1.2, 0.16]} radius={0.05} smoothness={4} position={[0, 2.25, 0]} castShadow>
         <meshStandardMaterial color="#4a4a68" roughness={0.46} metalness={0.22} />
       </RoundedBox>
       <mesh position={[0, 2.25, 0.088]}>
@@ -426,7 +431,7 @@ function DispatchBoard({ record }: { record?: DispatchRecord }) {
           <meshStandardMaterial color={METAL} metalness={0.55} roughness={0.4} />
         </mesh>
       ))}
-      <Html center zIndexRange={[5, 0]} distanceFactor={22} position={[0, 2.25, 0.13]}>
+      <Html center zIndexRange={[5, 0]} position={[0, 2.25, 0.13]}>
         <div className="dispatch-board" onClick={() => requestTab('dispatch')}>
           <span>派单台 / DISPATCH</span>
           <b>{record ? `${record.taskId} → ${record.stageId}` : '待命中'}</b>
@@ -513,7 +518,7 @@ function CameraRig({ camera }: { camera: CameraView }) {
           depthWrite={false}
         />
       </mesh>
-      <Html center zIndexRange={[5, 0]} distanceFactor={20} position={[0, 0.7, 0]}>
+      <Html center zIndexRange={[5, 0]} position={[0, 0.7, 0]}>
         <div
           className={'camera-tag' + (alert ? ' alert' : '') + (hovered ? ' hover' : '')}
           onClick={() => { focusOnCamera(camera.id); requestTab('observe') }}
@@ -599,6 +604,17 @@ function Partition({ x }: { x: number }) {
   )
 }
 
+/** Exposes the live scene graph so headless checks can measure what actually
+    reached the frame (a mesh can exist in the tree and still be culled or
+    degenerate). No visual effect, no cost in the render loop. */
+function SceneProbe() {
+  const scene = useThree((state) => state.scene)
+  useEffect(() => {
+    ;(window as unknown as { __medusaScene?: THREE.Scene }).__medusaScene = scene
+  }, [scene])
+  return null
+}
+
 function Scene() {
   const snapshot = useMedusaStore(selectSnapshot)
   const selectedWorkerId = useMedusaStore((state) => state.selectedWorkerId)
@@ -621,9 +637,15 @@ function Scene() {
     seen[worker.stageId] = index + 1
   })
   const lastDispatch = snapshot.dispatch?.[snapshot.dispatch.length - 1]
+  const stages: Stage[] = snapshot.stages.map((stage) => ({
+    ...stage,
+    position: { ...stage.position, x: stage.position.x * STAGE_SPREAD },
+  }))
 
   return (
     <>
+      <SceneProbe />
+      <RoomShell />
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.02, 0]} receiveShadow>
         <planeGeometry args={[80, 80]} />
         <meshStandardMaterial color="#d3dce6" roughness={0.97} metalness={0} />
@@ -641,29 +663,39 @@ function Scene() {
         fadeStrength={1.7}
         infiniteGrid
       />
-      {/* Rug with a slim binding: two layers give the edge a finished line
-          instead of a flat cut across the concrete. */}
-      <RoundedBox args={[17.62, 0.014, 9.42]} radius={0.3} smoothness={4} position={[0, 0.005, 1.1]} receiveShadow>
-        <meshStandardMaterial color="#c3d0de" roughness={1} metalness={0} />
-      </RoundedBox>
-      <RoundedBox args={[17.4, 0.02, 9.2]} radius={0.3} smoothness={4} position={[0, 0.01, 1.1]} receiveShadow>
-        <meshStandardMaterial color="#eaf0f7" roughness={1} metalness={0} />
-      </RoundedBox>
+      {/* Rug: two flat slabs, not RoundedBox. A 14 mm plate cannot carry a
+          0.3 m corner radius - drei extrudes the radius into thickness, which
+          turned the rug into a 1.4 m wall that swallowed the desks and every
+          character's legs. Flat boxes keep it at floor level. */}
+      <mesh position={[0, 0.004, 1.1]} receiveShadow>
+        <boxGeometry args={[17.62, 0.008, 9.42]} />
+        <meshStandardMaterial color="#adbdce" roughness={1} metalness={0} />
+      </mesh>
+      <mesh position={[0, 0.012, 1.1]} receiveShadow>
+        <boxGeometry args={[17.4, 0.008, 9.2]} />
+        <meshStandardMaterial color="#dbe6f2" roughness={1} metalness={0} />
+      </mesh>
       <OfficePlant x={-8.6} z={1.4} />
       <OfficePlant x={8.6} z={1.4} scale={0.86} />
       <FloorLamp x={-8.2} z={-2.6} />
       <FloorLamp x={8.2} z={-2.6} />
       <Partition x={-5} />
       <Partition x={5} />
+      <Cabinet x={-8.55} z={-8.9} />
+      <WallClock x={8.3} y={2.95} z={-9.32} />
+      <OfficeChair x={-7.9} z={0.35} accent="#8a93c9" rotation={0.7} />
+      <OfficeChair x={7.9} z={0.35} accent="#8a93c9" rotation={-0.7} />
+      <OfficePlant x={-6.9} z={-6.4} scale={1.75} />
+      <OfficePlant x={6.9} z={-6.4} scale={1.55} />
       <Conveyor />
-      {snapshot.stages.map((stage) => (
+      {stages.map((stage) => (
         <StagePlatform
           key={stage.id}
           stage={stage}
           highlighted={snapshot.boss.targetStageId === stage.id && snapshot.boss.mode !== 'patrol'}
         />
       ))}
-      {snapshot.stages.map((stage) => {
+      {stages.map((stage) => {
         const devices = (snapshot.tools ?? []).filter((tool) => tool.stageId === stage.id)
         return (
           <group key={'devices-' + stage.id} position={[stage.position.x, stage.position.y, stage.position.z]}>
@@ -671,7 +703,7 @@ function Scene() {
               <ToolDevice
                 key={tool.name}
                 tool={tool}
-                x={(i - (devices.length - 1) / 2) * 1.05}
+                x={(i - (devices.length - 1) / 2) * 0.92}
                 recent={tool.active || (tool.lastSeq > 0 && snapshot.seq - tool.lastSeq < 12)}
               />
             ))}
@@ -682,7 +714,7 @@ function Scene() {
         <WorkerFigure
           key={worker.id}
           worker={worker}
-          stage={snapshot.stages.find((stage) => stage.id === worker.stageId)}
+          stage={stages.find((stage) => stage.id === worker.stageId)}
           selected={selectedWorkerId === worker.id}
           offsetX={offsets[worker.id] ?? 0}
           labelLift={labelLifts[worker.id] ?? 0}
@@ -695,6 +727,7 @@ function Scene() {
           key={index}
           task={snapshot.tasks[snapshot.tasks.length - CRATE_SLOTS + index] ?? null}
           offset={((index % 3) - 1) * 0.36}
+          stages={stages}
         />
       ))}
       <DispatchBoard record={lastDispatch} />
@@ -721,9 +754,12 @@ export default function Workshop() {
         )) return
         closeAvatarEditor()
       }}
-      camera={{ position: [0, 10.8, 19.3], fov: 47.5 }}
+      camera={{ position: [0, 4.9, 11.2], fov: 36 }}
+      onCreated={({ scene, camera }) => {
+        ;(window as unknown as Record<string, unknown>).__MEDUSA = { scene, camera }
+      }}
       dpr={[1, 2]}
-      gl={{ antialias: false, alpha: true, toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.02 }}
+      gl={{ antialias: false, alpha: true, toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 0.97 }}
     >
       {/* No scene background: the CSS ceiling gradient shows through, which
           gives the horizon a soft falloff for free. */}
@@ -760,8 +796,8 @@ export default function Workshop() {
       <ContactShadows
         position={[0, 0.012, 0]}
         scale={38}
-        opacity={0.52}
-        blur={2}
+        opacity={0.64}
+        blur={1.7}
         far={8}
         resolution={1024}
         color="#3f4b5c"
@@ -770,10 +806,10 @@ export default function Workshop() {
       <OrbitControls
         enableDamping
         dampingFactor={0.08}
-        minDistance={8}
-        maxDistance={40}
+        minDistance={3}
+        maxDistance={42}
         maxPolarAngle={Math.PI / 2.1}
-        target={[0, 0.6, 0]}
+        target={[0, 0.9, 0.6]}
       />
       <EffectComposer multisampling={4} frameBufferType={THREE.HalfFloatType}>
         <Bloom intensity={0.3} luminanceThreshold={0.92} luminanceSmoothing={0.24} mipmapBlur radius={0.55} />

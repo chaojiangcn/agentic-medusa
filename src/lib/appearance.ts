@@ -15,10 +15,11 @@ export interface AvatarConfig {
 }
 
 export const AVATAR_MODELS = [
+  { id: 'human', name: '写实人偶', desc: '五官 · 关节 · 工牌（默认）' },
   { id: 'office', name: '工服人偶', desc: '衬衫 · 领带 · 工牌' },
   { id: 'blocky', name: '方块小人', desc: '低模方块造型' },
   { id: 'robot', name: '机器人', desc: '屏幕脸 · 发光关节' },
-  { id: 'capsule', name: '简约胶囊', desc: '最轻量的默认形象' },
+  { id: 'capsule', name: '简约胶囊', desc: '最轻量的形象' },
 ] as const
 
 export const AVATAR_COLORS = [
@@ -27,7 +28,7 @@ export const AVATAR_COLORS = [
 ]
 
 export const DEFAULT_AVATAR: AvatarConfig = {
-  model: 'office',
+  model: 'human',
   color: null,
   label: null,
   scale: 1,

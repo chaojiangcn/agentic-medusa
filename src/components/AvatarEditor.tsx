@@ -17,6 +17,15 @@ import type { AvatarConfig } from '@/lib/appearance'
 function Glyph({ id }: { id: string }) {
   return (
     <svg viewBox="0 0 32 40" width="30" height="36" aria-hidden="true">
+      {id === 'human' && (
+        <>
+          <circle cx="16" cy="7.5" r="5.6" fill="currentColor" opacity="0.9" />
+          <path d="M8.6 15.4c0-1.7 3.3-2.9 7.4-2.9s7.4 1.2 7.4 2.9l1 9.4c.1 1.3-1 2.2-2.3 2.2h-1.4l-.8 10.3h-3l-.7-8h-.2l-.7 8h-3l-.8-10.3H10.1c-1.3 0-2.4-.9-2.3-2.2z" fill="currentColor" opacity="0.55" />
+          <path d="M7.4 16.2 5.6 24a1.6 1.6 0 0 0 3.1.8l1.6-7.2z" fill="currentColor" opacity="0.4" />
+          <path d="M24.6 16.2 26.4 24a1.6 1.6 0 0 1-3.1.8l-1.6-7.2z" fill="currentColor" opacity="0.4" />
+          <rect x="14.6" y="15.2" width="2.8" height="7.4" rx="1" fill="#fff" opacity="0.85" />
+        </>
+      )}
       {id === 'office' && (
         <>
           <circle cx="16" cy="9" r="6" fill="currentColor" opacity="0.85" />

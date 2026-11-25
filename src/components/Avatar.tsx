@@ -1,9 +1,14 @@
 'use client'
 
 /**
- * Four built-in humanoids plus an optional GLB override. These are real
- * meshes (head, torso, limbs, face, clothing), not a capsule with a badge.
- * Status colour is passed in so a busy/blocked worker still reads at a glance.
+ * Built-in humanoids plus an optional GLB override.
+ *
+ * `human` is the default: a figure assembled from ~35 lathed/rounded parts
+ * rather than stacked boxes - tapered torso, jointed arms, actual face
+ * (eye whites, pupils, catchlights, brows, nose, smile curve), layered hair,
+ * collar, cuffs and a lanyard badge. The other three are kept as deliberately
+ * cheaper silhouettes, and a `glb:` path loads a real model when one is
+ * dropped into /public/models.
  */
 
 import { RoundedBox, useGLTF } from '@react-three/drei'
@@ -13,14 +18,17 @@ import { Component } from 'react'
 import type { ReactNode } from 'react'
 import { glbUrl } from '@/lib/appearance'
 
-const SKIN = '#e9cba9'
-const SKIN_DARK = '#d9b592'
-const HAIR = '#3c342f'
+const SKIN = '#f0d2b2'
+const SKIN_DARK = '#e0bf9d'
+const HAIR = '#3a312c'
 const DARK = '#3f4450'
 const STEEL = '#aab3bd'
 const WHITE = '#f5f7fa'
+const PANTS = '#525c70'
+const SHOE = '#2f343b'
 
 const HEAD_TOP: Record<string, number> = {
+  human: 0.70,
   office: 0.68,
   blocky: 0.75,
   robot: 0.86,
@@ -44,6 +52,261 @@ function Mat({
       emissive={emissive ?? '#000000'}
       emissiveIntensity={intensity}
     />
+  )
+}
+
+/**
+ * Half-silhouette of the torso, revolved around Y. Radii are narrow at the
+ * waist and widest at the chest, which is what stops the figure from reading
+ * as a cylinder. The lathe is squashed on Z afterwards so the body is deeper
+ * than it is wide, like a person rather than a bottle.
+ */
+const TORSO_PROFILE: [number, number][] = [
+  [0.004, -0.09],
+  [0.122, -0.085],
+  [0.142, -0.06],
+  [0.147, -0.03],
+  [0.157, 0.012],
+  [0.177, 0.098],
+  [0.193, 0.168],
+  [0.196, 0.214],
+  [0.178, 0.250],
+  [0.132, 0.271],
+  [0.004, 0.279],
+]
+
+function Human({ color }: { color: string }) {
+  const torso = useMemo(
+    () => TORSO_PROFILE.map(([r, y]) => new THREE.Vector2(r, y)),
+    [],
+  )
+
+  return (
+    <group>
+      {/* ---------- legs + shoes ---------- */}
+      {[-0.104, 0.104].map((x, i) => (
+        <group key={`leg-${i}`} position={[x, 0, 0]}>
+          <mesh position={[0, -0.596, 0.032]} castShadow>
+            <boxGeometry args={[0.146, 0.08, 0.24]} />
+            <Mat color={SHOE} roughness={0.5} metalness={0.06} />
+          </mesh>
+          <mesh position={[0, -0.632, 0.032]}>
+            <boxGeometry args={[0.154, 0.024, 0.248]} />
+            <Mat color="#f2f5f8" roughness={0.86} />
+          </mesh>
+          {/* calf */}
+          <mesh position={[0, -0.468, 0]} castShadow>
+            <boxGeometry args={[0.09, 0.19, 0.098]} />
+            <Mat color="#6d7793" roughness={0.86} />
+          </mesh>
+          {/* knee */}
+          <mesh position={[0, -0.373, 0.002]} castShadow>
+            <sphereGeometry args={[0.05, 18, 14]} />
+            <Mat color="#6d7793" roughness={0.86} />
+          </mesh>
+          {/* thigh */}
+          <mesh position={[0, -0.278, 0]} castShadow>
+            <boxGeometry args={[0.118, 0.192, 0.124]} />
+            <Mat color="#6d7793" roughness={0.86} />
+          </mesh>
+          <mesh position={[0, -0.552, 0]}>
+            <boxGeometry args={[0.096, 0.014, 0.104]} />
+            <Mat color="#39404d" roughness={0.86} />
+          </mesh>
+        </group>
+      ))}
+
+      {/* ---------- pelvis: a slab, not a sphere ----------
+          A squashed sphere here swallowed the top of both thighs and made the
+          figure read as a bust sitting on the desk. */}
+      <mesh position={[0, -0.128, 0]} castShadow>
+        <boxGeometry args={[0.268, 0.112, 0.198]} />
+        <Mat color={PANTS} roughness={0.86} />
+      </mesh>
+
+      {/* ---------- torso ---------- */}
+      <mesh scale={[1, 1, 0.8]} castShadow receiveShadow>
+        <latheGeometry args={[torso, 36]} />
+        <Mat color={color} roughness={0.62} />
+      </mesh>
+
+      {/* shoulder caps soften the arm seam */}
+      {[-0.162, 0.162].map((x) => (
+        <mesh key={x} position={[x, 0.206, 0]} scale={[1, 0.94, 0.94]} castShadow>
+          <sphereGeometry args={[0.077, 20, 16]} />
+          <Mat color={color} roughness={0.62} />
+        </mesh>
+      ))}
+
+      {/* ---------- arms ---------- */}
+      {[-1, 1].map((s) => (
+        <group key={s} position={[s * 0.226, 0.196, 0]} rotation={[0, 0, s * -0.15]}>
+          <mesh position={[0, -0.082, 0]} castShadow>
+            <capsuleGeometry args={[0.055, 0.13, 6, 16]} />
+            <Mat color={color} roughness={0.62} />
+          </mesh>
+          <mesh position={[0, -0.174, 0]} castShadow>
+            <sphereGeometry args={[0.053, 16, 12]} />
+            <Mat color={color} roughness={0.62} />
+          </mesh>
+          {/* the right forearm lifts a little, so the silhouette is not a
+              symmetrical monolith when seen from the default camera */}
+          <group rotation={[s === 1 ? -0.42 : -0.16, 0, s * 0.03]}>
+            <mesh position={[0, -0.252, 0.008]} castShadow>
+              <capsuleGeometry args={[0.046, 0.112, 6, 16]} />
+              <Mat color={color} roughness={0.62} />
+            </mesh>
+            {/* cuff */}
+            <mesh position={[0, -0.315, 0.01]}>
+              <cylinderGeometry args={[0.049, 0.049, 0.023, 18]} />
+              <Mat color="#f4f7fa" roughness={0.7} />
+            </mesh>
+            {/* hand + thumb */}
+            <mesh position={[0, -0.352, 0.014]} scale={[0.82, 1, 0.74]} castShadow>
+              <sphereGeometry args={[0.049, 16, 12]} />
+              <Mat color={SKIN} roughness={0.74} />
+            </mesh>
+            <mesh position={[s * 0.032, -0.348, 0.032]} rotation={[0, 0, s * -0.5]} scale={[0.7, 1, 0.7]}>
+              <sphereGeometry args={[0.026, 12, 10]} />
+              <Mat color={SKIN_DARK} roughness={0.76} />
+            </mesh>
+          </group>
+        </group>
+      ))}
+
+      {/* ---------- neck ---------- */}
+      <mesh position={[0, 0.286, -0.004]} castShadow>
+        <cylinderGeometry args={[0.057, 0.066, 0.078, 18]} />
+        <Mat color={SKIN} roughness={0.76} />
+      </mesh>
+
+      {/* open collar: two leaves + the strip of chest between them. These sit
+          on the *lathed* surface, which is squashed to 0.8 on Z, so every
+          decal needs a shallower Z than the torso radius suggests. */}
+      {[-1, 1].map((s) => (
+        <mesh key={s} position={[s * 0.05, 0.25, 0.144]} rotation={[0.2, 0, s * 0.5]}>
+          <boxGeometry args={[0.072, 0.052, 0.017]} />
+          <Mat color="#f8fafc" roughness={0.7} />
+        </mesh>
+      ))}
+      <mesh position={[0, 0.246, 0.14]} rotation={[0.18, 0, 0]}>
+        <boxGeometry args={[0.044, 0.046, 0.014]} />
+        <Mat color={SKIN} roughness={0.76} />
+      </mesh>
+      {/* tie */}
+      <mesh position={[0, 0.19, 0.158]} rotation={[0.06, 0, 0]}>
+        <boxGeometry args={[0.036, 0.082, 0.015]} />
+        <Mat color="#a4574f" roughness={0.56} />
+      </mesh>
+      <mesh position={[0, 0.231, 0.15]} rotation={[0, 0, Math.PI / 4]}>
+        <boxGeometry args={[0.05, 0.05, 0.014]} />
+        <Mat color="#a4574f" roughness={0.56} />
+      </mesh>
+
+      {/* ---------- lanyard + badge ---------- */}
+      {[-1, 1].map((s) => (
+        <mesh key={s} position={[s * 0.03, 0.19, 0.154]} rotation={[0, 0, s * 0.4]}>
+          <boxGeometry args={[0.011, 0.115, 0.008]} />
+          <Mat color="#4c5566" roughness={0.72} />
+        </mesh>
+      ))}
+      <RoundedBox
+        args={[0.076, 0.096, 0.013]} radius={0.008} smoothness={3}
+        position={[0, 0.118, 0.156]}
+      >
+        <Mat color="#fbfdff" roughness={0.56} />
+      </RoundedBox>
+      <mesh position={[0, 0.143, 0.164]}>
+        <boxGeometry args={[0.056, 0.011, 0.004]} />
+        <Mat color={color} roughness={0.5} />
+      </mesh>
+      <mesh position={[0, 0.122, 0.164]}>
+        <boxGeometry args={[0.042, 0.005, 0.003]} />
+        <Mat color="#c3cbd6" roughness={0.6} />
+      </mesh>
+
+      {/* ---------- head ---------- */}
+      <group position={[0, 0.478, 0]}>
+        <mesh scale={[1, 1.03, 0.97]} castShadow>
+          <sphereGeometry args={[0.192, 30, 22]} />
+          <Mat color={SKIN} roughness={0.74} />
+        </mesh>
+        {/* jaw */}
+        <mesh position={[0, -0.07, 0.016]} scale={[0.93, 0.78, 0.93]} castShadow>
+          <sphereGeometry args={[0.155, 24, 16]} />
+          <Mat color={SKIN} roughness={0.74} />
+        </mesh>
+        {/* ears */}
+        {[-1, 1].map((s) => (
+          <mesh key={s} position={[s * 0.187, -0.006, -0.004]} scale={[0.4, 1, 0.72]}>
+            <sphereGeometry args={[0.05, 14, 12]} />
+            <Mat color={SKIN_DARK} roughness={0.78} />
+          </mesh>
+        ))}
+        {/* nose */}
+        <mesh position={[0, -0.026, 0.182]} scale={[0.85, 1.05, 1.3]} castShadow>
+          <sphereGeometry args={[0.025, 14, 12]} />
+          <Mat color={SKIN} roughness={0.72} />
+        </mesh>
+        {/* eyes: white, iris, catchlight */}
+        {[-1, 1].map((s) => (
+          <group key={s} position={[s * 0.069, 0.016, 0.166]}>
+            <mesh scale={[1, 1.1, 0.42]}>
+              <sphereGeometry args={[0.037, 18, 14]} />
+              <Mat color="#fdfefe" roughness={0.32} />
+            </mesh>
+            <mesh position={[0, -0.002, 0.013]} scale={[1, 1.06, 0.4]}>
+              <sphereGeometry args={[0.0205, 16, 12]} />
+              <Mat color="#2b2a2e" roughness={0.26} />
+            </mesh>
+            <mesh position={[s * -0.006, 0.007, 0.019]}>
+              <sphereGeometry args={[0.0072, 10, 8]} />
+              <Mat color="#ffffff" roughness={0.18} emissive="#ffffff" intensity={0.5} />
+            </mesh>
+          </group>
+        ))}
+        {/* brows */}
+        {[-1, 1].map((s) => (
+          <mesh key={s} position={[s * 0.071, 0.071, 0.169]} rotation={[0.12, 0, s * -0.13]}>
+            <boxGeometry args={[0.06, 0.013, 0.015]} />
+            <Mat color={HAIR} roughness={0.88} />
+          </mesh>
+        ))}
+        {/* smile */}
+        <mesh position={[0, -0.106, 0.163]} rotation={[0, 0, Math.PI]}>
+          <torusGeometry args={[0.029, 0.0068, 8, 26, Math.PI * 0.86]} />
+          <Mat color="#b8746a" roughness={0.58} />
+        </mesh>
+
+        {/* Hair: a full sphere pushed back behind the face, plus fringe slabs
+            at the hairline. A hemisphere cap cannot work here - its rim always
+            lands across the eyes and the figure reads as a faceless blob. */}
+        <mesh position={[0, 0.022, -0.04]} scale={[1.025, 1, 1]} castShadow>
+          <sphereGeometry args={[0.2, 30, 22]} />
+          <Mat color={HAIR} roughness={0.9} />
+        </mesh>
+        {[
+          { x: -0.074, y: 0.112, z: 0.146, rz: 0.36, w: 0.074 },
+          { x: 0.002, y: 0.132, z: 0.152, rz: 0.05, w: 0.082 },
+          { x: 0.077, y: 0.108, z: 0.144, rz: -0.32, w: 0.068 },
+        ].map((f, i) => (
+          <RoundedBox
+            key={i} args={[f.w, 0.054, 0.05]} radius={0.018} smoothness={3}
+            position={[f.x, f.y, f.z]} rotation={[0.42, 0, f.rz]} castShadow
+          >
+            <Mat color={HAIR} roughness={0.9} />
+          </RoundedBox>
+        ))}
+        {[-1, 1].map((s) => (
+          <RoundedBox
+            key={s} args={[0.024, 0.092, 0.062]} radius={0.011} smoothness={3}
+            position={[s * 0.178, 0.03, 0.056]} rotation={[0, 0, s * 0.14]} castShadow
+          >
+            <Mat color={HAIR} roughness={0.9} />
+          </RoundedBox>
+        ))}
+      </group>
+    </group>
   )
 }
 
@@ -282,6 +545,7 @@ function Capsule({ color }: { color: string }) {
 
 function BuiltinAvatar({ model, color }: { model: string; color: string }) {
   switch (model) {
+    case 'human': return <Human color={color} />
     case 'office': return <Office color={color} />
     case 'blocky': return <Blocky color={color} />
     case 'robot': return <Robot color={color} />
@@ -360,14 +624,19 @@ export function Avatar({
         <Mat color={color} roughness={0.3} emissive={color} intensity={1.3} />
       </mesh>
       {boss && (
-        <group position={[0, headTop + 0.03, 0]}>
+        <group position={[0, headTop - 0.045, 0]}>
+          {/* Brim, crown and a gold band - sized to the head, not to the body. */}
           <mesh castShadow>
-            <cylinderGeometry args={[0.33, 0.33, 0.07, 24]} />
-            <Mat color={DARK} roughness={0.55} metalness={0.2} />
+            <cylinderGeometry args={[0.252, 0.252, 0.024, 36]} />
+            <Mat color="#2f3540" roughness={0.62} metalness={0.1} />
           </mesh>
-          <mesh position={[0, 0.07, 0]} castShadow>
-            <cylinderGeometry args={[0.24, 0.26, 0.15, 24]} />
-            <Mat color={DARK} roughness={0.55} metalness={0.2} />
+          <mesh position={[0, 0.026, 0]}>
+            <cylinderGeometry args={[0.198, 0.2, 0.03, 36]} />
+            <Mat color="#8a6a3f" roughness={0.5} metalness={0.28} />
+          </mesh>
+          <mesh position={[0, 0.078, 0]} castShadow>
+            <cylinderGeometry args={[0.168, 0.194, 0.108, 36]} />
+            <Mat color="#2f3540" roughness={0.6} metalness={0.1} />
           </mesh>
         </group>
       )}
