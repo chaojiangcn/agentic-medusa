@@ -83,9 +83,16 @@ function Human({ color }: { color: string }) {
 
   return (
     <group>
-      {/* ---------- legs + shoes ---------- */}
-      {[-0.104, 0.104].map((x, i) => (
-        <group key={`leg-${i}`} position={[x, 0, 0]}>
+      {/* ---------- legs + shoes ----------
+          Two identical parallel boxes read as a bust on a plinth. Tapered
+          thigh/calf widths, a slight outward stance, one foot a half-step
+          forward and a two-part shoe give the figure a real lower body. */}
+      {[-0.108, 0.108].map((x, i) => (
+        <group
+          key={`leg-${i}`}
+          position={[x, 0, i === 0 ? 0.016 : -0.016]}
+          rotation={[0, 0, x > 0 ? -0.035 : 0.035]}
+        >
           <mesh position={[0, -0.596, 0.032]} castShadow>
             <boxGeometry args={[0.146, 0.08, 0.24]} />
             <Mat color={SHOE} roughness={0.5} metalness={0.06} />
@@ -94,24 +101,34 @@ function Human({ color }: { color: string }) {
             <boxGeometry args={[0.154, 0.024, 0.248]} />
             <Mat color="#f2f5f8" roughness={0.86} />
           </mesh>
-          {/* calf */}
+          {/* toe cap, pushed forward so the shoe reads as a shoe */}
+          <mesh position={[0, -0.572, 0.116]} castShadow>
+            <boxGeometry args={[0.152, 0.056, 0.112]} />
+            <Mat color={SHOE} roughness={0.56} />
+          </mesh>
+          {/* calf: narrower than the thigh */}
           <mesh position={[0, -0.468, 0]} castShadow>
-            <boxGeometry args={[0.09, 0.19, 0.098]} />
+            <boxGeometry args={[0.084, 0.20, 0.09]} />
             <Mat color="#6d7793" roughness={0.86} />
           </mesh>
           {/* knee */}
           <mesh position={[0, -0.373, 0.002]} castShadow>
-            <sphereGeometry args={[0.05, 18, 14]} />
+            <sphereGeometry args={[0.047, 18, 14]} />
             <Mat color="#6d7793" roughness={0.86} />
           </mesh>
-          {/* thigh */}
+          {/* thigh: same cloth as the calf, the taper carries the shape */}
           <mesh position={[0, -0.278, 0]} castShadow>
-            <boxGeometry args={[0.118, 0.192, 0.124]} />
+            <boxGeometry args={[0.126, 0.192, 0.128]} />
             <Mat color="#6d7793" roughness={0.86} />
           </mesh>
           <mesh position={[0, -0.552, 0]}>
             <boxGeometry args={[0.096, 0.014, 0.104]} />
             <Mat color="#39404d" roughness={0.86} />
+          </mesh>
+          {/* outer seam keeps the taper legible at a distance */}
+          <mesh position={[x > 0 ? 0.064 : -0.064, -0.30, 0.066]}>
+            <boxGeometry args={[0.006, 0.17, 0.004]} />
+            <Mat color="#525c70" roughness={0.9} />
           </mesh>
         </group>
       ))}
@@ -122,6 +139,15 @@ function Human({ color }: { color: string }) {
       <mesh position={[0, -0.128, 0]} castShadow>
         <boxGeometry args={[0.268, 0.112, 0.198]} />
         <Mat color={PANTS} roughness={0.86} />
+      </mesh>
+      {/* belt + buckle: the waist should look like clothing, not a cut edge */}
+      <mesh position={[0, -0.052, 0]} castShadow>
+        <boxGeometry args={[0.278, 0.026, 0.206]} />
+        <Mat color="#333a46" roughness={0.72} />
+      </mesh>
+      <mesh position={[0, -0.052, 0.107]}>
+        <boxGeometry args={[0.042, 0.026, 0.008]} />
+        <Mat color="#c9b27e" roughness={0.4} metalness={0.35} />
       </mesh>
 
       {/* ---------- torso ---------- */}

@@ -666,15 +666,44 @@ function Scene() {
       {/* Rug: two flat slabs, not RoundedBox. A 14 mm plate cannot carry a
           0.3 m corner radius - drei extrudes the radius into thickness, which
           turned the rug into a 1.4 m wall that swallowed the desks and every
-          character's legs. Flat boxes keep it at floor level. */}
-      <mesh position={[0, 0.004, 1.1]} receiveShadow>
-        <boxGeometry args={[17.62, 0.008, 9.42]} />
-        <meshStandardMaterial color="#adbdce" roughness={1} metalness={0} />
+          character's legs. Flat boxes keep it at floor level.
+
+          Sized to the work zone instead of the whole room, with a bound edge
+          and module seams. A rug that runs off all four edges of the frame
+          reads as an empty sheet; one that ends inside the frame reads as a
+          designed floor. */}
+      <mesh position={[0, 0.004, 0.8]} receiveShadow>
+        <boxGeometry args={[13.6, 0.008, 7.9]} />
+        <meshStandardMaterial color="#a8b8cb" roughness={1} metalness={0} />
       </mesh>
-      <mesh position={[0, 0.012, 1.1]} receiveShadow>
-        <boxGeometry args={[17.4, 0.008, 9.2]} />
+      <mesh position={[0, 0.012, 0.8]} receiveShadow>
+        <boxGeometry args={[13.3, 0.008, 7.6]} />
         <meshStandardMaterial color="#dbe6f2" roughness={1} metalness={0} />
       </mesh>
+      {[-3.72, 3.72].map((pz) => (
+        <mesh key={`rug-edge-z-${pz}`} position={[0, 0.019, 0.8 + pz]} receiveShadow>
+          <boxGeometry args={[13.32, 0.004, 0.09]} />
+          <meshStandardMaterial color="#b2c1d3" roughness={1} />
+        </mesh>
+      ))}
+      {[-6.56, 6.56].map((px) => (
+        <mesh key={`rug-edge-x-${px}`} position={[px, 0.019, 0.8]} receiveShadow>
+          <boxGeometry args={[0.09, 0.004, 7.62]} />
+          <meshStandardMaterial color="#b2c1d3" roughness={1} />
+        </mesh>
+      ))}
+      {[-2.4, 2.4].map((pz) => (
+        <mesh key={`rug-seam-z-${pz}`} position={[0, 0.017, 0.8 + pz]} receiveShadow>
+          <boxGeometry args={[13.3, 0.002, 0.028]} />
+          <meshStandardMaterial color="#bccadb" roughness={1} />
+        </mesh>
+      ))}
+      {[-4.42, 0, 4.42].map((px) => (
+        <mesh key={`rug-seam-x-${px}`} position={[px, 0.017, 0.8]} receiveShadow>
+          <boxGeometry args={[0.028, 0.002, 7.6]} />
+          <meshStandardMaterial color="#bccadb" roughness={1} />
+        </mesh>
+      ))}
       <OfficePlant x={-8.6} z={1.4} />
       <OfficePlant x={8.6} z={1.4} scale={0.86} />
       <FloorLamp x={-8.2} z={-2.6} />
@@ -754,7 +783,7 @@ export default function Workshop() {
         )) return
         closeAvatarEditor()
       }}
-      camera={{ position: [0, 4.9, 11.2], fov: 36 }}
+      camera={{ position: [0, 4.35, 11.6], fov: 36 }}
       onCreated={({ scene, camera }) => {
         ;(window as unknown as Record<string, unknown>).__MEDUSA = { scene, camera }
       }}
