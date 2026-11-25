@@ -31,3 +31,6 @@ probe/
 .playwright-cli/
 medusa-*.png
 .DS_Store
+
+# --- Local verification sandbox (playwright, not a dependency) ---
+.pwtmp/
