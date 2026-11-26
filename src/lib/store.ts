@@ -150,7 +150,14 @@ export const selectSnapshot = (state: MedusaState) => {
   // front, so a stale cursor can point past the end. Returning null there
   // unmounts the whole 3D tree (every Html label included).
   const index = Math.min(Math.max(state.cursor, 0), state.frames.length - 1)
-  return state.frames[index]?.snapshot ?? null
+  if (state.frames[index]?.snapshot) return state.frames[index].snapshot
+  // A frame can arrive without a projection (a transport artifact, or an event
+  // written while the shop was mid-update). The newest frame is not allowed to
+  // blank the room: fall back to the closest earlier frame that still has one.
+  for (let i = index - 1; i >= 0; i--) {
+    if (state.frames[i]?.snapshot) return state.frames[i].snapshot
+  }
+  return null
 }
 
 export const useMedusaStore = create<MedusaState>((set, get) => ({
@@ -257,26 +264,6 @@ export const useMedusaStore = create<MedusaState>((set, get) => ({
         if (Array.isArray(templates) && Array.isArray(criteria)) {
           set({ orderDesk: { templates, criteria } })
         }
-        // Replay the persisted log so a reload restores the exact timeline.
-        void get()
-          .call<{ frames?: Frame[]; thread?: ThreadInfo }>('thread/resume', {})
-          .then((res) => {
-            if (Array.isArray(res?.frames) && res.frames.length > 0) {
-              set((state) => {
-                // Trimming and the cursor must agree. Measuring the cursor
-                // against the untrimmed length pointed past the end of the
-                // buffer, which blanked the snapshot and tore down the scene.
-                const frames = res.frames!.slice(-MAX_FRAMES)
-                return {
-                  frames,
-                  cursor: state.playing
-                    ? frames.length - 1
-                    : Math.min(state.cursor, frames.length - 1),
-                }
-              })
-            }
-          })
-          .catch(() => undefined)
         void get()
           .call<{ threads?: ThreadInfo[] }>('thread/list', {})
           .then((res) => {
@@ -284,7 +271,13 @@ export const useMedusaStore = create<MedusaState>((set, get) => ({
           })
           .catch(() => undefined)
 
-        // Paint immediately, then keep a slow poll as the safety net.
+        // First paint comes from one snapshot plus the live stream. Calling
+        // `thread/resume` here replayed the entire log — after a long shift
+        // that response grew to ~44 MB (every event plus 240 full projections)
+        // and blocked the main thread for ten seconds, which looked exactly
+        // like "the workshop never loaded". The timeline now builds from the
+        // frames collected during this session, and the REST snapshot fills
+        // the first frame immediately.
         void pollOnce()
         if (!pollTimer) {
           pollTimer = setInterval(() => void pollOnce(), 1000)
@@ -408,3 +401,10 @@ export const useMedusaStore = create<MedusaState>((set, get) => ({
     }
   },
 }))
+
+// A read-only debug handle. The 3D room is a projection of this store, so a
+// blank room is otherwise indistinguishable from a WebGL failure. Headless
+// checks read frame counts and snapshots from here.
+if (typeof window !== 'undefined') {
+  ;(window as unknown as { __medusaStore?: typeof useMedusaStore }).__medusaStore = useMedusaStore
+}

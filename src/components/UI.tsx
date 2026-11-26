@@ -292,7 +292,7 @@ export function UI() {
               <h3>投单台 · 给工作室派活</h3>
               <p className="note">
                 工单从这儿进队列，下一个节拍由派单台接手：派单 → 模型推理 → 设备小票 → oracle 判定。
-                全过程写进 append-only 日志，刷新页面可回放。
+                全过程写进 append-only 日志，刷新后从最新快照恢复。
               </p>
               <div className="order-form">
                 <label>工单标题</label>
@@ -819,7 +819,7 @@ export function UI() {
         />
         <div className="ticks">
           <span>起点</span>
-          <span>状态由 append-only 日志投影，刷新页面可 thread/resume 重建</span>
+          <span>状态由 append-only 日志投影 · 刷新从最新快照恢复</span>
           <span>最新 · {maxCursor}</span>
         </div>
       </footer>

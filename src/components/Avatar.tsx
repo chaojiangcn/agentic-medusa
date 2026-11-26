@@ -12,10 +12,11 @@
  */
 
 import { RoundedBox, useGLTF } from '@react-three/drei'
+import { useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
-import { Suspense, useMemo } from 'react'
+import { Suspense, useMemo, useRef } from 'react'
 import { Component } from 'react'
-import type { ReactNode } from 'react'
+import type { ReactNode, RefObject } from 'react'
 import { glbUrl } from '@/lib/appearance'
 
 const SKIN = '#f0d2b2'
@@ -82,54 +83,71 @@ const CLOTH = '#6d7793'
     worker on a chair without measuring the geometry at runtime. */
 export const SEATED_Y = 0.512
 
-/** Standing legs: tapered thigh/calf, a slight outward stance and a two-part
-    shoe. Two identical parallel boxes read as a bust on a plinth. */
-function StandingLegs() {
+/** Per-frame intent handed down from the scene: how fast the figure is
+    walking (0..1) and how hard it is typing (0..1). Joint angles are derived
+    here, so the scene never has to know the rig. */
+export interface HumanMotion {
+  speed: number
+  typing: number
+}
+
+/** Standing legs with real joints. The hip pivot sits at the top of the thigh
+    and the knee pivot at the joint sphere, so a walk cycle can rotate the
+    whole leg and then fold the shin — a single rigid group can only slide. */
+function StandingLegs({
+  hips, knees,
+}: {
+  hips: [RefObject<THREE.Group | null>, RefObject<THREE.Group | null>]
+  knees: [RefObject<THREE.Group | null>, RefObject<THREE.Group | null>]
+}) {
   return (
     <group>
       {[-0.108, 0.108].map((x, i) => (
         <group
           key={`leg-${i}`}
-          position={[x, 0, i === 0 ? 0.016 : -0.016]}
+          ref={hips[i]}
+          position={[x, -0.182, i === 0 ? 0.016 : -0.016]}
           rotation={[0, 0, x > 0 ? -0.035 : 0.035]}
         >
-          <mesh position={[0, -0.596, 0.032]} castShadow>
-            <boxGeometry args={[0.146, 0.08, 0.24]} />
-            <Mat color={SHOE} roughness={0.5} metalness={0.06} />
-          </mesh>
-          <mesh position={[0, -0.632, 0.032]}>
-            <boxGeometry args={[0.154, 0.024, 0.248]} />
-            <Mat color="#f2f5f8" roughness={0.86} />
-          </mesh>
-          {/* toe cap, pushed forward so the shoe reads as a shoe */}
-          <mesh position={[0, -0.572, 0.116]} castShadow>
-            <boxGeometry args={[0.152, 0.056, 0.112]} />
-            <Mat color={SHOE} roughness={0.56} />
-          </mesh>
-          {/* calf: narrower than the thigh */}
-          <mesh position={[0, -0.468, 0]} castShadow>
-            <boxGeometry args={[0.084, 0.20, 0.09]} />
-            <Mat color={CLOTH} roughness={0.86} />
-          </mesh>
-          {/* knee */}
-          <mesh position={[0, -0.373, 0.002]} castShadow>
-            <sphereGeometry args={[0.047, 18, 14]} />
-            <Mat color={CLOTH} roughness={0.86} />
-          </mesh>
           {/* thigh: same cloth as the calf, the taper carries the shape */}
-          <mesh position={[0, -0.278, 0]} castShadow>
+          <mesh position={[0, -0.096, 0]} castShadow>
             <boxGeometry args={[0.126, 0.192, 0.128]} />
             <Mat color={CLOTH} roughness={0.86} />
           </mesh>
-          <mesh position={[0, -0.552, 0]}>
-            <boxGeometry args={[0.096, 0.014, 0.104]} />
-            <Mat color="#39404d" roughness={0.86} />
-          </mesh>
           {/* outer seam keeps the taper legible at a distance */}
-          <mesh position={[x > 0 ? 0.064 : -0.064, -0.30, 0.066]}>
+          <mesh position={[x > 0 ? 0.064 : -0.064, -0.118, 0.066]}>
             <boxGeometry args={[0.006, 0.17, 0.004]} />
             <Mat color="#525c70" roughness={0.9} />
           </mesh>
+          <group ref={knees[i]} position={[0, -0.191, 0]}>
+            {/* knee */}
+            <mesh castShadow>
+              <sphereGeometry args={[0.047, 18, 14]} />
+              <Mat color={CLOTH} roughness={0.86} />
+            </mesh>
+            {/* calf: narrower than the thigh */}
+            <mesh position={[0, -0.095, 0]} castShadow>
+              <boxGeometry args={[0.084, 0.20, 0.09]} />
+              <Mat color={CLOTH} roughness={0.86} />
+            </mesh>
+            <mesh position={[0, -0.179, 0]}>
+              <boxGeometry args={[0.096, 0.014, 0.104]} />
+              <Mat color="#39404d" roughness={0.86} />
+            </mesh>
+            <mesh position={[0, -0.223, 0.032]} castShadow>
+              <boxGeometry args={[0.146, 0.08, 0.24]} />
+              <Mat color={SHOE} roughness={0.5} metalness={0.06} />
+            </mesh>
+            <mesh position={[0, -0.259, 0.032]}>
+              <boxGeometry args={[0.154, 0.024, 0.248]} />
+              <Mat color="#f2f5f8" roughness={0.86} />
+            </mesh>
+            {/* toe cap, pushed forward so the shoe reads as a shoe */}
+            <mesh position={[0, -0.199, 0.116]} castShadow>
+              <boxGeometry args={[0.152, 0.056, 0.112]} />
+              <Mat color={SHOE} roughness={0.56} />
+            </mesh>
+          </group>
         </group>
       ))}
     </group>
@@ -181,15 +199,86 @@ function SeatedLegs() {
   )
 }
 
-function Human({ color, pose = 'stand' }: { color: string; pose?: 'stand' | 'sit' }) {
+function Human({
+  color, pose = 'stand', motion,
+}: {
+  color: string
+  pose?: 'stand' | 'sit'
+  motion?: { current: HumanMotion }
+}) {
   const torso = useMemo(
     () => TORSO_PROFILE.map(([r, y]) => new THREE.Vector2(r, y)),
     [],
   )
+  const hipL = useRef<THREE.Group>(null)
+  const hipR = useRef<THREE.Group>(null)
+  const kneeL = useRef<THREE.Group>(null)
+  const kneeR = useRef<THREE.Group>(null)
+  const armL = useRef<THREE.Group>(null)
+  const armR = useRef<THREE.Group>(null)
+  const elbowL = useRef<THREE.Group>(null)
+  const elbowR = useRef<THREE.Group>(null)
+  const head = useRef<THREE.Group>(null)
+  const phase = useRef(0)
+
+  useFrame((_, delta) => {
+    const m = motion?.current
+    const speed = m?.speed ?? 0
+    const typing = m?.typing ?? 0
+    phase.current += delta * (2.6 + speed * 6.4)
+    const p = phase.current
+
+    if (pose === 'sit') {
+      // Seated: forearms reach the desk and tap while the worker is busy.
+      // The tap is two out-of-phase sines, which reads as typing rather than
+      // as a single rocking motion.
+      const reach = -0.5 - 0.1 * typing
+      if (armL.current) {
+        armL.current.rotation.x = reach + Math.sin(p * 1.9) * 0.045 * typing
+        armL.current.rotation.z = 0.15 * (1 - typing * 0.4)
+      }
+      if (armR.current) {
+        armR.current.rotation.x = reach + Math.sin(p * 1.9 + 1.1) * 0.045 * typing
+        armR.current.rotation.z = -0.15 * (1 - typing * 0.4)
+      }
+      if (elbowL.current) {
+        elbowL.current.rotation.x = -0.66 + Math.sin(p * 1.9 + 0.4) * 0.15 * typing
+      }
+      if (elbowR.current) {
+        elbowR.current.rotation.x = -0.66 + Math.sin(p * 1.9 + 1.5) * 0.15 * typing
+      }
+      if (head.current) {
+        head.current.rotation.x = 0.06 * typing + Math.sin(p * 1.1) * 0.014 * typing
+        head.current.rotation.y = Math.sin(p * 0.45) * 0.06
+      }
+      return
+    }
+
+    // Standing: hip swing carries the leg, the knee folds on the back stroke,
+    // arms counter-swing. Everything is scaled by speed, so a stopped figure
+    // stands perfectly still instead of freezing mid-step.
+    const swing = 0.62 * speed
+    const s = Math.sin(p)
+    if (hipL.current) hipL.current.rotation.x = s * swing
+    if (hipR.current) hipR.current.rotation.x = -s * swing
+    if (kneeL.current) kneeL.current.rotation.x = Math.max(0, -s) * swing * 1.7
+    if (kneeR.current) kneeR.current.rotation.x = Math.max(0, s) * swing * 1.7
+    if (armL.current) armL.current.rotation.x = s * swing * 0.85
+    if (armR.current) armR.current.rotation.x = -s * swing * 0.85
+    if (elbowL.current) elbowL.current.rotation.x = -0.16 - 0.14 * speed
+    if (elbowR.current) elbowR.current.rotation.x = -0.36 - 0.16 * speed
+    if (head.current) {
+      head.current.rotation.y = Math.sin(p * 0.35) * 0.08 * speed
+      head.current.rotation.x = 0
+    }
+  })
+
+  const hips: [RefObject<THREE.Group | null>, RefObject<THREE.Group | null>] = [hipL, hipR]
+  const knees: [RefObject<THREE.Group | null>, RefObject<THREE.Group | null>] = [kneeL, kneeR]
 
   return (
     <group>
-      {pose === 'sit' ? <SeatedLegs /> : <StandingLegs />}
+      {pose === 'sit' ? <SeatedLegs /> : <StandingLegs hips={hips} knees={knees} />}
 
       {/* ---------- pelvis: a slab, not a sphere ----------
           A squashed sphere here swallowed the top of both thighs and made the
@@ -223,8 +312,13 @@ function Human({ color, pose = 'stand' }: { color: string; pose?: 'stand' | 'sit
       ))}
 
       {/* ---------- arms ---------- */}
-      {[-1, 1].map((s) => (
-        <group key={s} position={[s * 0.226, 0.196, 0]} rotation={[0, 0, s * -0.15]}>
+      {[-1, 1].map((s, i) => (
+        <group
+          key={s}
+          ref={i === 0 ? armL : armR}
+          position={[s * 0.226, 0.196, 0]}
+          rotation={[0, 0, s * -0.15]}
+        >
           <mesh position={[0, -0.082, 0]} castShadow>
             <capsuleGeometry args={[0.055, 0.13, 6, 16]} />
             <Mat color={color} roughness={0.62} />
@@ -235,7 +329,7 @@ function Human({ color, pose = 'stand' }: { color: string; pose?: 'stand' | 'sit
           </mesh>
           {/* the right forearm lifts a little, so the silhouette is not a
               symmetrical monolith when seen from the default camera */}
-          <group rotation={[s === 1 ? -0.42 : -0.16, 0, s * 0.03]}>
+          <group ref={i === 0 ? elbowL : elbowR} rotation={[s === 1 ? -0.42 : -0.16, 0, s * 0.03]}>
             <mesh position={[0, -0.252, 0.008]} castShadow>
               <capsuleGeometry args={[0.046, 0.112, 6, 16]} />
               <Mat color={color} roughness={0.62} />
@@ -310,7 +404,7 @@ function Human({ color, pose = 'stand' }: { color: string; pose?: 'stand' | 'sit
       </mesh>
 
       {/* ---------- head ---------- */}
-      <group position={[0, 0.478, 0]}>
+      <group ref={head} position={[0, 0.478, 0]}>
         <mesh scale={[1, 1.03, 0.97]} castShadow>
           <sphereGeometry args={[0.192, 30, 22]} />
           <Mat color={SKIN} roughness={0.74} />
@@ -627,9 +721,16 @@ function Capsule({ color }: { color: string }) {
   )
 }
 
-function BuiltinAvatar({ model, color, pose = 'stand' }: { model: string; color: string; pose?: 'stand' | 'sit' }) {
+function BuiltinAvatar({
+  model, color, pose = 'stand', motion,
+}: {
+  model: string
+  color: string
+  pose?: 'stand' | 'sit'
+  motion?: { current: HumanMotion }
+}) {
   switch (model) {
-    case 'human': return <Human color={color} pose={pose} />
+    case 'human': return <Human color={color} pose={pose} motion={motion} />
     case 'office': return <Office color={color} />
     case 'blocky': return <Blocky color={color} />
     case 'robot': return <Robot color={color} />
@@ -682,13 +783,14 @@ class ModelBoundary extends Component<
 }
 
 export function Avatar({
-  model, color, boss = false, scale = 1, pose = 'stand',
+  model, color, boss = false, scale = 1, pose = 'stand', motionRef,
 }: {
   model: string
   color: string
   boss?: boolean
   scale?: number
   pose?: 'stand' | 'sit'
+  motionRef?: { current: HumanMotion }
 }) {
   const headTop = HEAD_TOP[model] ?? HEAD_TOP.capsule
   const fallback = <BuiltinAvatar model="capsule" color={color} />
@@ -701,7 +803,7 @@ export function Avatar({
           </Suspense>
         </ModelBoundary>
       ) : (
-        <BuiltinAvatar model={model} color={color} pose={pose} />
+        <BuiltinAvatar model={model} color={color} pose={pose} motion={motionRef} />
       )}
       {/* Status beacon sits above every model, so state survives a swap. */}
       <mesh position={[0, headTop + 0.14, 0]}>

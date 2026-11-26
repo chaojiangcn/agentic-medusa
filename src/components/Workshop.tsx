@@ -12,6 +12,7 @@ import { CAMERA_PRESETS, selectSnapshot, useMedusaStore } from '@/lib/store'
 import type { CameraPreset } from '@/lib/store'
 import { BOSS_KEY, resolveAvatar, workerKey } from '@/lib/appearance'
 import { Avatar, SEATED_Y } from './Avatar'
+import type { HumanMotion } from './Avatar'
 import {
   Bust, Credenza, DESK_D, DESK_H, Desk, DeskKit, Easel, Plant, RoomShell, ShelfUnit,
   TaskChair, WallArt, WallClock, BoxStack,
@@ -119,6 +120,9 @@ function WorkerFigure({
 }) {
   const group = useRef<THREE.Group>(null)
   const halo = useRef<THREE.Mesh>(null)
+  // The rig reads this every frame. While seated, "speed" stays at zero and
+  // the typing channel drives the forearms instead.
+  const motion = useRef<HumanMotion>({ speed: 0, typing: 0 })
   const [hovered, setHovered] = useState(false)
   const appearance = useMedusaStore((state) => state.appearance)
   const openAvatarEditor = useMedusaStore((state) => state.openAvatarEditor)
@@ -139,6 +143,7 @@ function WorkerFigure({
     const bob = worker.status === 'busy' ? 0.007 : 0.003
     group.current.position.y = baseY + Math.sin(t * 1.6 + worker.id.length) * bob
     group.current.rotation.y = anchor.rot + Math.sin(t * 0.45 + worker.id.length) * 0.045
+    motion.current.typing = worker.status === 'busy' ? 1 : 0.15
     if (halo.current) {
       const m = halo.current.material as THREE.MeshBasicMaterial
       m.opacity = isEditing
@@ -150,6 +155,7 @@ function WorkerFigure({
   return (
     <group
       ref={group}
+      name={`worker-${worker.id}`}
       position={[anchor.x, baseY, anchor.z]}
       onClick={(event) => {
         event.stopPropagation()
@@ -172,7 +178,13 @@ function WorkerFigure({
         <capsuleGeometry args={[0.42, seated ? 0.5 : 0.68, 4, 10]} />
         <meshBasicMaterial transparent opacity={0} depthWrite={false} />
       </mesh>
-      <Avatar model={avatar.model} color={color} scale={avatar.scale} pose={seated ? 'sit' : 'stand'} />
+      <Avatar
+        model={avatar.model}
+        color={color}
+        scale={avatar.scale}
+        pose={seated ? 'sit' : 'stand'}
+        motionRef={motion}
+      />
       <mesh
         ref={halo}
         rotation={[-Math.PI / 2, 0, 0]}
@@ -202,17 +214,46 @@ function WorkerFigure({
 /// unmount a crate's Html label when the order list shifts.
 const CRATE_SLOTS = 10
 
-function TaskCrate({ task, offset, stages }: { task: WorkTask | null; offset: number; stages: Stage[] }) {
+function TaskCrate({
+  task, offset, stages, front,
+}: {
+  task: WorkTask | null
+  offset: number
+  stages: Stage[]
+  front: boolean
+}) {
+  const group = useRef<THREE.Group>(null)
+  const goal = useMemo(() => new THREE.Vector3(), [])
+  const start = useRef<[number, number, number] | null>(null)
   const done = !task || task.status === 'done' || task.status === 'failed'
+  // One crate per station: the order that arrived last is the one being
+  // worked on. Older orders stay in the log, not on the floor in a pile.
+  const show = !done && front
   const slot = Math.min(task?.stageIndex ?? 0, stages.length - 1)
-  const next = Math.min(slot + 1, stages.length - 1)
-  const from = stages[slot]?.position.x ?? 0
-  const to = stages[next]?.position.x ?? from
-  const x = task ? from + (to - from) * task.progress : stages[0]?.position.x ?? 0
+  const stage = stages[slot]
+  // There is no conveyor any more: the crate stands on the floor beside
+  // whichever station is holding the order, and damps across when the order
+  // moves to the next station. Movement without machinery.
+  goal.set(
+    (stage?.position.x ?? 0) + 1.18 + offset * 0.3,
+    0,
+    (stage?.position.z ?? 0) + 0.62 + Math.abs(offset) * 0.18,
+  )
+  if (!start.current) start.current = [goal.x, 0, goal.z]
+  useFrame(() => {
+    if (!group.current) return
+    group.current.position.lerp(goal, 0.055)
+  })
   const failed = task?.status === 'failed'
   const color = failed ? '#cf6f6b' : '#dfe6ee'
   return (
-    <group visible={!done} position={[x, 0.13, 3.15 + offset]}>
+    <group
+      ref={group}
+      name={task ? `crate-${task.id}` : 'crate-empty'}
+      visible={show}
+      position={start.current}
+      rotation={[0, offset * 0.9, 0]}
+    >
       <RoundedBox args={[0.4, 0.32, 0.4]} radius={0.05} smoothness={3} position={[0, 0.16, 0]} castShadow>
         <meshStandardMaterial color={color} roughness={0.62} metalness={0.05} />
       </RoundedBox>
@@ -221,7 +262,7 @@ function TaskCrate({ task, offset, stages }: { task: WorkTask | null; offset: nu
         <meshStandardMaterial color={failed ? '#f0c9c6' : '#8fa0b3'} roughness={0.5} />
       </mesh>
       <Html center zIndexRange={[5, 0]} position={[0, 0.44, 0]}>
-        <div className="task-tag" style={{ opacity: done ? 0 : 1 }}>{task?.id ?? ''}</div>
+        <div className="task-tag" style={{ opacity: show ? 1 : 0 }}>{task?.id ?? ''}</div>
       </Html>
     </group>
   )
@@ -229,9 +270,18 @@ function TaskCrate({ task, offset, stages }: { task: WorkTask | null; offset: nu
 
 function BossFigure({ boss }: { boss: Boss }) {
   const group = useRef<THREE.Group>(null)
+  const motion = useRef<HumanMotion>({ speed: 0, typing: 0 })
   const aisleX = boss.x < 0 ? -1.02 : 1.32
   const targetX = useRef(aisleX)
   targetX.current = boss.x < 0 ? -1.02 : 1.32
+  const targetZ = useRef(-2.62 + boss.z * 0.02)
+  targetZ.current = -2.62 + boss.z * 0.02
+  // The group's position must NOT be bound to the aisle prop. If React writes
+  // the new aisle into `position` on the frame the backend flips sides, the
+  // figure teleports and there is no displacement left to animate. Spawn once,
+  // then let the frame loop walk it across.
+  const spawn = useRef<[number, number, number] | null>(null)
+  if (!spawn.current) spawn.current = [aisleX, 0.645, -2.62 + boss.z * 0.02]
   const [hovered, setHovered] = useState(false)
   const appearance = useMedusaStore((state) => state.appearance)
   const openAvatarEditor = useMedusaStore((state) => state.openAvatarEditor)
@@ -247,16 +297,34 @@ function BossFigure({ boss }: { boss: Boss }) {
   const avatar = resolveAvatar(appearance, BOSS_KEY, modeColor)
   const color = avatar.effectiveColor
 
-  useFrame(() => {
+  useFrame((_, delta) => {
     if (!group.current) return
-    group.current.position.x += (targetX.current - group.current.position.x) * 0.09
-    group.current.rotation.y = Math.sin(targetX.current) * 0.2
+    const before = group.current.position.x
+    group.current.position.x += (targetX.current - group.current.position.x) * 0.028
+    // Walk cycle is driven by real displacement, not by a timer: the feet only
+    // move while the body is actually travelling, and they stop on arrival.
+    const v = (group.current.position.x - before) / Math.max(delta, 1 / 120)
+    motion.current.speed = THREE.MathUtils.damp(
+      motion.current.speed,
+      Math.min(1, Math.abs(v) / 1.1),
+      6,
+      delta,
+    )
+    const facing = Math.abs(v) > 0.12 ? (v > 0 ? Math.PI / 2 : -Math.PI / 2) : 0
+    group.current.rotation.y = THREE.MathUtils.damp(group.current.rotation.y, facing, 4, delta)
+    group.current.position.z = THREE.MathUtils.damp(
+      group.current.position.z,
+      targetZ.current,
+      3,
+      delta,
+    )
   })
 
   return (
     <group
       ref={group}
-      position={[aisleX, 0.645, -2.62 + boss.z * 0.02]}
+      name="boss-figure"
+      position={spawn.current}
       onClick={(event) => {
         event.stopPropagation()
         openAvatarEditor({ kind: 'boss', name: '老板', status: boss.mode })
@@ -279,47 +347,13 @@ function BossFigure({ boss }: { boss: Boss }) {
         <capsuleGeometry args={[0.45, 0.66, 4, 10]} />
         <meshBasicMaterial transparent opacity={0} depthWrite={false} />
       </mesh>
-      <Avatar model={avatar.model} color={color} boss scale={avatar.scale * 1.05} />
+      <Avatar model={avatar.model} color={color} boss scale={avatar.scale * 1.05} motionRef={motion} />
       <Html center zIndexRange={[32, 22]} position={[0, 1.06, 0]}>
         <div
           className={`boss-tag ${boss.mode}`}
           onClick={() => openAvatarEditor({ kind: 'boss', name: '老板', status: boss.mode })}
         >{avatar.label || '老板'} · {boss.note || boss.mode}</div>
       </Html>
-    </group>
-  )
-}
-
-function Conveyor() {
-  const stripes = useRef<THREE.Group>(null)
-  // Stripes are spaced exactly one unit apart, so shifting the whole group by
-  // a fractional unit creates an endless belt without touching every child.
-  useFrame(({ clock }) => {
-    if (stripes.current) stripes.current.position.x = (clock.getElapsedTime() * 0.4) % 1
-  })
-  return (
-    <group position={[0, 0, 3.15]}>
-      <RoundedBox args={[11.6, 0.09, 1.2]} radius={0.028} smoothness={3} position={[0, 0.045, 0]} receiveShadow castShadow>
-        <meshStandardMaterial color="#f6f8fb" roughness={0.5} metalness={0.04} />
-      </RoundedBox>
-      <mesh position={[0, 0.083, 0]}>
-        <boxGeometry args={[11.2, 0.012, 1.02]} />
-        <meshStandardMaterial color="#eaeef4" roughness={0.62} />
-      </mesh>
-      <group ref={stripes}>
-        {Array.from({ length: 13 }, (_, i) => (
-          <mesh key={i} position={[-6 + i, 0.088, 0]}>
-            <boxGeometry args={[0.04, 0.008, 1.04]} />
-            <meshStandardMaterial color="#d7dee8" roughness={0.8} />
-          </mesh>
-        ))}
-      </group>
-      {[-0.65, 0.65].map((z) => (
-        <mesh key={z} position={[0, 0.105, z]} castShadow>
-          <boxGeometry args={[11.2, 0.07, 0.035]} />
-          <meshStandardMaterial color="#c6ced8" roughness={0.35} metalness={0.5} />
-        </mesh>
-      ))}
     </group>
   )
 }
@@ -454,11 +488,11 @@ function CameraRig({ camera }: { camera: CameraView }) {
       </mesh>
       <mesh position={[0, 0.02, 0]} castShadow>
         <cylinderGeometry args={[0.16, 0.19, 0.04, 20]} />
-        <meshStandardMaterial color="#e6ebf1" roughness={0.5} metalness={0.15} />
+        <meshStandardMaterial color="#4a515c" roughness={0.5} metalness={0.3} />
       </mesh>
       <mesh position={[0, 1.05, 0]} castShadow>
         <cylinderGeometry args={[0.016, 0.022, 2.1, 10]} />
-        <meshStandardMaterial color="#c9d1da" metalness={0.5} roughness={0.35} />
+        <meshStandardMaterial color="#3d444f" metalness={0.55} roughness={0.32} />
       </mesh>
       <group position={[0, 2.12, 0]} rotation={tilt}>
         <RoundedBox args={[0.26, 0.19, 0.34]} radius={0.04} smoothness={3} castShadow>
@@ -474,7 +508,12 @@ function CameraRig({ camera }: { camera: CameraView }) {
         </mesh>
         <mesh position={[0.1, 0.085, 0.06]}>
           <sphereGeometry args={[0.016, 10, 8]} />
-          <meshStandardMaterial color="#e8796f" emissive="#e84a3c" emissiveIntensity={alert ? 1.6 : 0.7} />
+          <meshStandardMaterial color="#ff7b6f" emissive="#ff3524" emissiveIntensity={alert ? 2.4 : 1.3} />
+        </mesh>
+        {/* A soft glow so the REC lamp survives the white studio light. */}
+        <mesh position={[0.1, 0.085, 0.06]}>
+          <sphereGeometry args={[0.034, 12, 10]} />
+          <meshBasicMaterial color="#ff6a5c" transparent opacity={alert ? 0.32 : 0.18} depthWrite={false} />
         </mesh>
       </group>
       {/* A translucent cone: what this viewpoint can see. It is a hint, not
@@ -623,6 +662,13 @@ function Scene() {
       z: STAGE_LAYOUT[i]?.z ?? 0,
     },
   }))
+  // The latest unfinished order at each station is the one standing on the
+  // floor. Everything older is still in the log; it just isn't a pile of boxes.
+  const activeByStage = new Map<number, string>()
+  snapshot.tasks.forEach((task) => {
+    if (task.status === 'done' || task.status === 'failed') return
+    activeByStage.set(task.stageIndex, task.id)
+  })
 
   return (
     <>
@@ -648,7 +694,6 @@ function Scene() {
       <BoxStack x={-4.0} z={-2.15} rotation={0.3} />
       <BoxStack x={2.75} z={-3.15} rotation={-0.4} />
 
-      <Conveyor />
       {stages.map((stage, index) => {
         const devices = (snapshot.tools ?? [])
           .filter((tool) => tool.stageId === stage.id)
@@ -683,14 +728,19 @@ function Scene() {
       })}
       {/* Only the newest crates: finished ones stay mounted but hidden, so a
           long shift never grows an unbounded HTML label layer. */}
-      {Array.from({ length: CRATE_SLOTS }, (_, index) => (
-        <TaskCrate
-          key={index}
-          task={snapshot.tasks[snapshot.tasks.length - CRATE_SLOTS + index] ?? null}
-          offset={((index % 3) - 1) * 0.3}
-          stages={stages}
-        />
-      ))}
+      {Array.from({ length: CRATE_SLOTS }, (_, index) => {
+        const task = snapshot.tasks[snapshot.tasks.length - CRATE_SLOTS + index] ?? null
+        const slot = task ? Math.min(task.stageIndex, stages.length - 1) : -1
+        return (
+          <TaskCrate
+            key={index}
+            task={task}
+            offset={((index % 3) - 1) * 0.3}
+            stages={stages}
+            front={task ? activeByStage.get(slot) === task.id : false}
+          />
+        )
+      })}
       <DispatchBoard record={lastDispatch} />
       {(snapshot.cameras ?? []).map((camera) => (
         <CameraRig key={camera.id} camera={camera} />

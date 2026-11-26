@@ -356,7 +356,12 @@ async fn protocol_info() -> impl IntoResponse {
 /// Replay budget. Every frame embeds a full projection, so replaying a long
 /// append-only log frame-by-frame turns into hundreds of MB over the wire.
 /// The UI only keeps a sliding window, so the server sends the tail only.
-const MAX_REPLAY_FRAMES: usize = 240;
+/// How many replay frames `thread/resume` returns. Each frame carries a full
+/// projection of the shop (stages, workers, tasks, tools, cameras), so this
+/// number multiplies directly into the websocket payload. 240 frames plus the
+/// raw event list used to ship ~44 MB, and the browser spent ten seconds
+/// parsing it before the first paint. The timeline only needs recent history.
+const MAX_REPLAY_FRAMES: usize = 64;
 
 pub async fn build_frames(state: &Arc<AppState>, thread_id: &str, after_seq: u64) -> Vec<Frame> {
     let events = {
@@ -934,7 +939,9 @@ async fn dispatch(
             let frames = build_frames(state, &thread, 0).await;
             Ok(json!({
                 "thread": state.store.lock().await.thread(&thread),
-                "events": state.store.lock().await.events_for(&thread, 0),
+                // `events` is deliberately not shipped here: the UI replays
+                // from `frames`, and returning every historical event made the
+                // resume payload tens of megabytes.
                 "frames": frames,
                 "snapshot": state.snapshot.lock().await.clone(),
                 "note": "已从 append-only 日志重建状态"
