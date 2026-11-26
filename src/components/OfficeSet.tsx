@@ -47,9 +47,14 @@ const CODE: [number, number, number, string][] = [
   [-0.25, 0.18, 0.223, '#b7c4d4'],
 ]
 
+/** The worker sits on the -z side of the desk and faces +z, so the screen has
+    to point at -z: originally the panel faced the camera and the seated
+    worker only ever saw the back of the monitor. Rotating the whole group by
+    ~180 degrees puts the lit panel in front of the worker and leaves the
+    (detailed) back shell facing the room. */
 function Monitor({ x, z }: { x: number; z: number }) {
   return (
-    <group position={[x, DESK_H, z]} rotation={[0, 0.15, 0]}>
+    <group name="workstation-monitor" position={[x, DESK_H, z]} rotation={[0, Math.PI - 0.15, 0]}>
       <RoundedBox args={[0.3, 0.016, 0.17]} radius={0.006} smoothness={3} position={[0, 0.008, 0]} castShadow>
         <meshStandardMaterial color={PANEL} roughness={0.5} metalness={0.18} />
       </RoundedBox>
@@ -60,7 +65,30 @@ function Monitor({ x, z }: { x: number; z: number }) {
       <RoundedBox args={[0.7, 0.44, 0.026]} radius={0.012} smoothness={3} position={[0, 0.345, 0]} castShadow>
         <meshStandardMaterial color="#59626f" roughness={0.42} metalness={0.16} />
       </RoundedBox>
-      <mesh position={[0, 0.345, 0.015]}>
+
+      {/* Back shell: the room looks at this side. A blank dark slab would read
+          as a hole in a white studio, so give it a light housing, a brand bar,
+          vents and a power LED. */}
+      <RoundedBox args={[0.688, 0.428, 0.008]} radius={0.01} smoothness={3} position={[0, 0.345, -0.016]} castShadow>
+        <meshStandardMaterial color="#e8edf4" roughness={0.62} metalness={0.08} />
+      </RoundedBox>
+      <mesh position={[0, 0.41, -0.024]}>
+        <boxGeometry args={[0.12, 0.011, 0.004]} />
+        <meshStandardMaterial color="#aab7c7" roughness={0.55} metalness={0.25} />
+      </mesh>
+      {[0, 1, 2].map((i) => (
+        <mesh key={i} position={[0, 0.3 - i * 0.015, -0.024]}>
+          <boxGeometry args={[0.28, 0.004, 0.004]} />
+          <meshStandardMaterial color="#c7d1de" roughness={0.72} />
+        </mesh>
+      ))}
+      <mesh position={[0.29, 0.16, -0.024]}>
+        <boxGeometry args={[0.012, 0.012, 0.004]} />
+        <meshStandardMaterial color="#7fd8b4" emissive="#4fc79b" emissiveIntensity={0.9} />
+      </mesh>
+
+      {/* Screen face: local +z is world -z, i.e. toward the seated worker. */}
+      <mesh name="monitor-screen" position={[0, 0.345, 0.015]}>
         <planeGeometry args={[0.66, 0.4]} />
         <meshStandardMaterial color={SCREEN} emissive="#eaf3ff" emissiveIntensity={0.7} roughness={0.2} />
       </mesh>
@@ -85,7 +113,7 @@ function Monitor({ x, z }: { x: number; z: number }) {
 
 function Keyboard({ x, z }: { x: number; z: number }) {
   return (
-    <group position={[x, DESK_H, z]} rotation={[0, 0.03, 0]}>
+    <group name="workstation-keyboard" position={[x, DESK_H, z]} rotation={[0, 0.03, 0]}>
       <RoundedBox args={[0.4, 0.014, 0.14]} radius={0.005} smoothness={3} position={[0, 0.007, 0]} castShadow>
         <meshStandardMaterial color="#eef2f7" roughness={0.55} />
       </RoundedBox>
@@ -217,9 +245,14 @@ function DeskPlant({ x, z }: { x: number; z: number }) {
 export function DeskKit({ accent }: { accent: string }) {
   return (
     <group>
-      <Monitor x={-0.45} z={-0.3} />
-      <Keyboard x={-0.45} z={0.06} />
-      <Mouse x={-0.12} z={0.08} />
+      {/* Desk orientation: the seated worker is at z = -0.9 and faces +z.
+          So the monitor sits at the FAR edge (+z) with its screen pointing
+          back at the worker, and the keyboard/mouse sit on the near edge
+          between the worker and the screen. Everything else keeps to the
+          right-hand half so it never blocks that sight line. */}
+      <Monitor x={-0.4} z={0.4} />
+      <Keyboard x={-0.4} z={-0.14} />
+      <Mouse x={0.0} z={-0.12} />
       <PaperStack x={0.2} z={0.14} />
       <Mug x={0.0} z={0.38} />
       <PenCup x={0.55} z={0.3} />
