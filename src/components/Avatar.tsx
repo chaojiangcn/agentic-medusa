@@ -84,11 +84,13 @@ const CLOTH = '#6d7793'
 export const SEATED_Y = 0.512
 
 /** Per-frame intent handed down from the scene: how fast the figure is
-    walking (0..1) and how hard it is typing (0..1). Joint angles are derived
-    here, so the scene never has to know the rig. */
+    walking (0..1), how hard it is typing (0..1), and the signed hand-off
+    intent (+1 = pushing a crate out, -1 = reaching to receive one). Joint
+    angles are derived here, so the scene never has to know the rig. */
 export interface HumanMotion {
   speed: number
   typing: number
+  handoff: number
 }
 
 /** Standing legs with real joints. The hip pivot sits at the top of the thigh
@@ -231,24 +233,38 @@ function Human({
     if (pose === 'sit') {
       // Seated: forearms reach the desk and tap while the worker is busy.
       // The tap is two out-of-phase sines, which reads as typing rather than
-      // as a single rocking motion.
-      const reach = -0.5 - 0.1 * typing
+      // as a single rocking motion. A hand-off overrides typing: the source
+      // worker straightens both arms to push the crate away, the destination
+      // worker opens the arms and bends the elbows to catch it.
+      const handoff = m?.handoff ?? 0
+      const push = Math.max(0, handoff)
+      const receive = Math.max(0, -handoff)
+      const reach = -0.5 - 0.1 * typing - 0.36 * push - 0.26 * receive
       if (armL.current) {
-        armL.current.rotation.x = reach + Math.sin(p * 1.9) * 0.045 * typing
-        armL.current.rotation.z = 0.15 * (1 - typing * 0.4)
+        armL.current.rotation.x = reach
+          + Math.sin(p * 1.9) * 0.045 * typing
+          + Math.sin(p * 2.6) * 0.055 * push
+        armL.current.rotation.z = 0.15 * (1 - typing * 0.4) + 0.2 * receive
       }
       if (armR.current) {
-        armR.current.rotation.x = reach + Math.sin(p * 1.9 + 1.1) * 0.045 * typing
-        armR.current.rotation.z = -0.15 * (1 - typing * 0.4)
+        armR.current.rotation.x = reach
+          + Math.sin(p * 1.9 + 1.1) * 0.045 * typing
+          + Math.sin(p * 2.6 + 0.8) * 0.055 * push
+        armR.current.rotation.z = -0.15 * (1 - typing * 0.4) - 0.2 * receive
       }
       if (elbowL.current) {
-        elbowL.current.rotation.x = -0.66 + Math.sin(p * 1.9 + 0.4) * 0.15 * typing
+        elbowL.current.rotation.x = -0.66
+          + Math.sin(p * 1.9 + 0.4) * 0.15 * typing
+          + 0.48 * push - 0.28 * receive
       }
       if (elbowR.current) {
-        elbowR.current.rotation.x = -0.66 + Math.sin(p * 1.9 + 1.5) * 0.15 * typing
+        elbowR.current.rotation.x = -0.66
+          + Math.sin(p * 1.9 + 1.5) * 0.15 * typing
+          + 0.48 * push - 0.28 * receive
       }
       if (head.current) {
-        head.current.rotation.x = 0.06 * typing + Math.sin(p * 1.1) * 0.014 * typing
+        head.current.rotation.x = 0.06 * typing + 0.12 * push - 0.09 * receive
+          + Math.sin(p * 1.1) * 0.014 * typing
         head.current.rotation.y = Math.sin(p * 0.45) * 0.06
       }
       return
@@ -315,6 +331,7 @@ function Human({
       {[-1, 1].map((s, i) => (
         <group
           key={s}
+          name={i === 0 ? 'joint-arm-l' : 'joint-arm-r'}
           ref={i === 0 ? armL : armR}
           position={[s * 0.226, 0.196, 0]}
           rotation={[0, 0, s * -0.15]}
@@ -329,7 +346,11 @@ function Human({
           </mesh>
           {/* the right forearm lifts a little, so the silhouette is not a
               symmetrical monolith when seen from the default camera */}
-          <group ref={i === 0 ? elbowL : elbowR} rotation={[s === 1 ? -0.42 : -0.16, 0, s * 0.03]}>
+          <group
+            name={i === 0 ? 'joint-elbow-l' : 'joint-elbow-r'}
+            ref={i === 0 ? elbowL : elbowR}
+            rotation={[s === 1 ? -0.42 : -0.16, 0, s * 0.03]}
+          >
             <mesh position={[0, -0.252, 0.008]} castShadow>
               <capsuleGeometry args={[0.046, 0.112, 6, 16]} />
               <Mat color={color} roughness={0.62} />

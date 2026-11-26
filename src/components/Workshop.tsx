@@ -6,7 +6,7 @@ import {
 } from '@react-three/drei'
 import { Bloom, EffectComposer, N8AO, Vignette } from '@react-three/postprocessing'
 import * as THREE from 'three'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { CAMERA_PRESETS, selectSnapshot, useMedusaStore } from '@/lib/store'
 import type { CameraPreset } from '@/lib/store'
@@ -111,18 +111,22 @@ function WorkerFigure({
   selected,
   tint,
   labelLift = 0,
+  stageIndex,
+  handoff,
 }: {
   worker: Worker
   anchor: { x: number; z: number; rot: number }
   selected: boolean
   tint: string
   labelLift?: number
+  stageIndex: number
+  handoff: { current: HandoffState | null }
 }) {
   const group = useRef<THREE.Group>(null)
   const halo = useRef<THREE.Mesh>(null)
   // The rig reads this every frame. While seated, "speed" stays at zero and
-  // the typing channel drives the forearms instead.
-  const motion = useRef<HumanMotion>({ speed: 0, typing: 0 })
+  // the typing / hand-off channels drive the forearms instead.
+  const motion = useRef<HumanMotion>({ speed: 0, typing: 0, handoff: 0 })
   const [hovered, setHovered] = useState(false)
   const appearance = useMedusaStore((state) => state.appearance)
   const openAvatarEditor = useMedusaStore((state) => state.openAvatarEditor)
@@ -144,6 +148,21 @@ function WorkerFigure({
     group.current.position.y = baseY + Math.sin(t * 1.6 + worker.id.length) * bob
     group.current.rotation.y = anchor.rot + Math.sin(t * 0.45 + worker.id.length) * 0.045
     motion.current.typing = worker.status === 'busy' ? 1 : 0.15
+    // A hand-off is a per-frame read of the shared bus, not React state. The
+    // source station pushes (+1), the destination reaches out a beat later
+    // (-1); both fade back to zero when the crate lands.
+    const h = handoff.current
+    if (h) {
+      const u = (clock.elapsedTime - h.t0) / h.duration
+      const pushEnv = u >= 0 && u <= 1 ? Math.sin(Math.PI * u) : 0
+      const ru = (u - 0.2) / 0.8
+      const receiveEnv = ru >= 0 && ru <= 1 ? Math.sin(Math.PI * ru) : 0
+      motion.current.handoff =
+        (stageIndex === h.fromStage ? pushEnv : 0) -
+        (stageIndex === h.toStage ? receiveEnv : 0)
+    } else {
+      motion.current.handoff = 0
+    }
     if (halo.current) {
       const m = halo.current.material as THREE.MeshBasicMaterial
       m.opacity = isEditing
@@ -210,49 +229,176 @@ function WorkerFigure({
   )
 }
 
-/// Fixed crate slots on the floor. A constant count means React never has to
-/// unmount a crate's Html label when the order list shifts.
-const CRATE_SLOTS = 10
+/** One in-flight hand-off, shared by the crates and the seated rigs. A crate
+    publishes it when its order crosses a station boundary; the workers read
+    it every frame. No React state is involved, so a stage change never
+    re-renders (and never unmounts) the scene. */
+interface HandoffState {
+  fromStage: number
+  toStage: number
+  t0: number
+  duration: number
+  taskId: string
+}
+// 0.95s read as a flicker on the wide shot and left the seated rigs no time
+// to sell the push/catch. 1.3s is slow enough to follow, short enough not to
+// stall the line.
+const HANDOFF_SECONDS = 1.3
+
+/** Watches the order list itself, not the crate slots. Slot indices shift
+    whenever the log grows, so a crate component cannot reliably remember
+    which station an order was at. Keying on task.id makes the hand-off
+    immune to that shift. */
+function HandoffWatcher({
+  tasks, stages, handoff,
+}: {
+  tasks: WorkTask[]
+  stages: Stage[]
+  handoff: { current: HandoffState | null }
+}) {
+  const memory = useRef<Map<string, number>>(new Map())
+  useFrame(({ clock }) => {
+    const now = clock.elapsedTime
+    // Retire a finished hand-off so crates and rigs never replay it.
+    const active = handoff.current
+    if (active && now - active.t0 > HANDOFF_SECONDS + 0.08) handoff.current = null
+    const recent = tasks.slice(-24)
+    const alive = new Set<string>()
+    for (const task of recent) {
+      alive.add(task.id)
+      const last = memory.current.get(task.id)
+      // An order often crosses its last station and completes in the SAME
+      // frame, so filtering out finished tasks would swallow the final
+      // hand-off entirely. Memory is updated every frame, so a done order
+      // publishes exactly once and then stays quiet.
+      if (last !== undefined && last !== task.stageIndex) {
+        handoff.current = {
+          fromStage: Math.min(last, stages.length - 1),
+          toStage: Math.min(task.stageIndex, stages.length - 1),
+          t0: now,
+          duration: HANDOFF_SECONDS,
+          taskId: task.id,
+        }
+      }
+      memory.current.set(task.id, task.stageIndex)
+    }
+    for (const id of memory.current.keys()) {
+      if (!alive.has(id)) memory.current.delete(id)
+    }
+  })
+  return null
+}
 
 function TaskCrate({
-  task, offset, stages, front,
+  task, offset, stages, handoff,
 }: {
   task: WorkTask | null
   offset: number
   stages: Stage[]
-  front: boolean
+  handoff: { current: HandoffState | null }
 }) {
   const group = useRef<THREE.Group>(null)
   const goal = useMemo(() => new THREE.Vector3(), [])
-  const start = useRef<[number, number, number] | null>(null)
+  const flight = useRef<{
+    from: THREE.Vector3
+    to: THREE.Vector3
+    t0: number
+  } | null>(null)
+  // A delivered crate lingers briefly after landing; vanishing on the exact
+  // frame the order completes made the hand-off look like a glitch.
+  const landedAt = useRef(0)
   const done = !task || task.status === 'done' || task.status === 'failed'
-  // One crate per station: the order that arrived last is the one being
-  // worked on. Older orders stay in the log, not on the floor in a pile.
-  const show = !done && front
   const slot = Math.min(task?.stageIndex ?? 0, stages.length - 1)
   const stage = stages[slot]
-  // There is no conveyor any more: the crate stands on the floor beside
-  // whichever station is holding the order, and damps across when the order
-  // moves to the next station. Movement without machinery.
+  // There is no conveyor any more. Crates rest on a shared line in the open
+  // floor in front of the desks (rather than tucked behind a desk where the
+  // furniture hides them), and fly across in an arc when the order moves to
+  // the next station. Keeping z fixed makes the hand-off travel mostly along
+  // x, so the arc reads clearly from the wide shot.
+  // Pull the shared crate line toward the centre of the visible 3D viewport.
+  // The side panels cover the far left/right of the canvas, so a crate that
+  // tracked the full stage x (2.4) landed behind the right metrics panel.
   goal.set(
-    (stage?.position.x ?? 0) + 1.18 + offset * 0.3,
+    (stage?.position.x ?? 0) * 0.62 + offset * 0.3,
     0,
-    (stage?.position.z ?? 0) + 0.62 + Math.abs(offset) * 0.18,
+    1.15 + Math.abs(offset) * 0.18,
   )
-  if (!start.current) start.current = [goal.x, 0, goal.z]
-  useFrame(() => {
+  // The transform belongs to the frame loop. Passing position/rotation as
+  // props made React snap the crate back to its spawn on every
+  // snapshot-driven re-render, which fought the arc and made the crate appear
+  // to flicker in and out of the room.
+  useLayoutEffect(() => {
     if (!group.current) return
-    group.current.position.lerp(goal, 0.055)
+    group.current.position.set(goal.x, 0, goal.z)
+    group.current.rotation.y = offset * 0.9
+    // Visibility is owned by useFrame from the next frame on. Leaving a
+    // `visible` prop in JSX let React switch the crate off on every
+    // snapshot-driven re-render, which raced the frame loop and made the
+    // crate disappear for most of its flight.
+    group.current.visible = false
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useFrame(({ clock }) => {
+    if (!group.current) return
+    const now = clock.elapsedTime
+    // The watcher publishes hand-offs keyed by task.id, so a crate can pick
+    // up its own arc even when the log grew and shifted its slot index.
+    const h = handoff.current
+    if (task && h && h.taskId === task.id && !flight.current
+        && now - h.t0 < HANDOFF_SECONDS * 0.6) {
+      flight.current = {
+        from: group.current.position.clone(),
+        to: goal.clone(),
+        t0: h.t0,
+      }
+    }
+
+    // A crate in flight stays visible even if the station just changed hands,
+    // and a delivered crate lingers for a moment so the landing reads.
+    group.current.visible =
+      !done || !!flight.current || (landedAt.current > 0 && now - landedAt.current < 1)
+    const f = flight.current
+    if (!f) {
+      group.current.position.lerp(goal, 0.055)
+      group.current.rotation.x = 0
+      group.current.rotation.z = 0
+      group.current.scale.setScalar(1)
+      return
+    }
+    const t = Math.min(1, (now - f.t0) / HANDOFF_SECONDS)
+    const e = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
+    group.current.position.lerpVectors(f.from, f.to, e)
+    group.current.position.y =
+      // Clear the desk line (0.55) at the apex. A 0.52 arc flew exactly at
+      // desktop height, so the crate spent the whole hand-off hidden behind
+      // the furniture and looked like it never moved.
+      Math.sin(Math.PI * t) * 0.78 +
+      (t > 0.8
+        ? Math.abs(Math.sin(((t - 0.8) / 0.2) * Math.PI * 2)) * 0.055 * (1 - t) / 0.2
+        : 0)
+    group.current.rotation.z = Math.sin(t * Math.PI) * 0.13
+    group.current.rotation.x = Math.sin(t * Math.PI * 1.35) * 0.075
+    // A small pulse makes the lift read even when the crate is only a few
+    // pixels wide on the wide shot; it settles back to 1 on landing.
+    group.current.scale.setScalar(1 + Math.sin(Math.PI * t) * 0.12)
+    if (t >= 1) {
+      group.current.position.copy(f.to)
+      group.current.rotation.x = 0
+      group.current.rotation.z = 0
+      group.current.scale.setScalar(1)
+      flight.current = null
+      landedAt.current = now
+    }
   })
   const failed = task?.status === 'failed'
-  const color = failed ? '#cf6f6b' : '#dfe6ee'
+  // A mid-tone slate reads against the white studio floor; near-white crates
+  // vanished into it. The strap below adds the contrast edge.
+  const color = failed ? '#cf6f6b' : '#8fa4bf'
   return (
     <group
       ref={group}
       name={task ? `crate-${task.id}` : 'crate-empty'}
-      visible={show}
-      position={start.current}
-      rotation={[0, offset * 0.9, 0]}
     >
       <RoundedBox args={[0.4, 0.32, 0.4]} radius={0.05} smoothness={3} position={[0, 0.16, 0]} castShadow>
         <meshStandardMaterial color={color} roughness={0.62} metalness={0.05} />
@@ -261,8 +407,14 @@ function TaskCrate({
         <boxGeometry args={[0.26, 0.01, 0.02]} />
         <meshStandardMaterial color={failed ? '#f0c9c6' : '#8fa0b3'} roughness={0.5} />
       </mesh>
+      {/* Packing strap. A white crate on a white floor is invisible from the
+          wide shot, and an invisible crate makes the hand-off look broken. */}
+      <mesh position={[0, 0.16, 0]} castShadow>
+        <boxGeometry args={[0.41, 0.07, 0.41]} />
+        <meshStandardMaterial color={failed ? '#c97873' : '#3a4759'} roughness={0.52} metalness={0.12} />
+      </mesh>
       <Html center zIndexRange={[5, 0]} position={[0, 0.44, 0]}>
-        <div className="task-tag" style={{ opacity: show ? 1 : 0 }}>{task?.id ?? ''}</div>
+        <div className="task-tag" style={{ opacity: done ? 0 : 1 }}>{task?.id ?? ''}</div>
       </Html>
     </group>
   )
@@ -270,7 +422,7 @@ function TaskCrate({
 
 function BossFigure({ boss }: { boss: Boss }) {
   const group = useRef<THREE.Group>(null)
-  const motion = useRef<HumanMotion>({ speed: 0, typing: 0 })
+  const motion = useRef<HumanMotion>({ speed: 0, typing: 0, handoff: 0 })
   const aisleX = boss.x < 0 ? -1.02 : 1.32
   const targetX = useRef(aisleX)
   targetX.current = boss.x < 0 ? -1.02 : 1.32
@@ -545,9 +697,11 @@ function CameraRig({ camera }: { camera: CameraView }) {
     degenerate). No visual effect, no cost in the render loop. */
 function SceneProbe() {
   const scene = useThree((state) => state.scene)
+  const camera = useThree((state) => state.camera)
   useEffect(() => {
     ;(window as unknown as { __medusaScene?: THREE.Scene }).__medusaScene = scene
-  }, [scene])
+    ;(window as unknown as { __medusaCamera?: THREE.Camera }).__medusaCamera = camera
+  }, [scene, camera])
   return null
 }
 
@@ -633,6 +787,12 @@ function CameraDirector({ preset }: { preset: CameraPreset }) {
 }
 
 function Scene() {
+  // Declared before the early return so the hook order stays stable even when
+  // a bad frame leaves us without a snapshot.
+  const handoff = useRef<HandoffState | null>(null)
+  useEffect(() => {
+    ;(window as unknown as { __medusaHandoff?: typeof handoff }).__medusaHandoff = handoff
+  }, [])
   const snapshot = useMedusaStore(selectSnapshot)
   const selectedWorkerId = useMedusaStore((state) => state.selectedWorkerId)
   if (!snapshot) return null
@@ -662,17 +822,13 @@ function Scene() {
       z: STAGE_LAYOUT[i]?.z ?? 0,
     },
   }))
-  // The latest unfinished order at each station is the one standing on the
-  // floor. Everything older is still in the log; it just isn't a pile of boxes.
-  const activeByStage = new Map<number, string>()
-  snapshot.tasks.forEach((task) => {
-    if (task.status === 'done' || task.status === 'failed') return
-    activeByStage.set(task.stageIndex, task.id)
-  })
+  // Crates are resolved per station below, so a long log never starves the
+  // live order of a slot.
 
   return (
     <>
       <SceneProbe />
+      <HandoffWatcher tasks={snapshot.tasks} stages={stages} handoff={handoff} />
       <RoomShell />
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0]} receiveShadow>
         <planeGeometry args={[90, 90]} />
@@ -723,21 +879,29 @@ function Scene() {
             selected={selectedWorkerId === worker.id}
             tint={soften(stage.color, 0.6, 0.5)}
             labelLift={labelLifts[worker.id] ?? 0}
+            stageIndex={index}
+            handoff={handoff}
           />
         )
       })}
-      {/* Only the newest crates: finished ones stay mounted but hidden, so a
-          long shift never grows an unbounded HTML label layer. */}
-      {Array.from({ length: CRATE_SLOTS }, (_, index) => {
-        const task = snapshot.tasks[snapshot.tasks.length - CRATE_SLOTS + index] ?? null
-        const slot = task ? Math.min(task.stageIndex, stages.length - 1) : -1
+      {/* One crate per station: the live order if there is one, otherwise the
+          most recent delivered one (so the landing stays visible for a beat).
+          Slicing the tail of the log used to fill every slot with finished
+          orders, leaving the crate that was actually moving without a slot. */}
+      {stages.map((stage, index) => {
+        const live = snapshot.tasks.filter(
+          (t) => t.stageIndex === index && t.status !== 'done' && t.status !== 'failed',
+        )
+        const finished = snapshot.tasks.filter(
+          (t) => t.stageIndex === index && (t.status === 'done' || t.status === 'failed'),
+        )
         return (
           <TaskCrate
-            key={index}
-            task={task}
-            offset={((index % 3) - 1) * 0.3}
+            key={stage.id}
+            task={live[live.length - 1] ?? finished[finished.length - 1] ?? null}
+            offset={0}
             stages={stages}
-            front={task ? activeByStage.get(slot) === task.id : false}
+            handoff={handoff}
           />
         )
       })}
