@@ -8,7 +8,8 @@ import { Bloom, EffectComposer, N8AO, Vignette } from '@react-three/postprocessi
 import * as THREE from 'three'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
-import { selectSnapshot, useMedusaStore } from '@/lib/store'
+import { CAMERA_PRESETS, selectSnapshot, useMedusaStore } from '@/lib/store'
+import type { CameraPreset } from '@/lib/store'
 import { BOSS_KEY, resolveAvatar, workerKey } from '@/lib/appearance'
 import { Avatar, SEATED_Y } from './Avatar'
 import {
@@ -511,6 +512,87 @@ function SceneProbe() {
   return null
 }
 
+/** OrbitControls is only needed for three fields; keeping a narrow shape
+    avoids pulling three-stdlib types into the component. */
+type OrbitLike = {
+  target: THREE.Vector3
+  enabled: boolean
+  update: () => void
+  addEventListener: (type: string, listener: () => void) => void
+  removeEventListener: (type: string, listener: () => void) => void
+}
+
+interface ShotTween {
+  t: number
+  fromPos: THREE.Vector3
+  fromTarget: THREE.Vector3
+  fromFov: number
+  toPos: THREE.Vector3
+  toTarget: THREE.Vector3
+  toFov: number
+}
+
+const easeInOut = (t: number) => t * t * (3 - 2 * t)
+
+/** Moves the camera between shots instead of hard-cutting. OrbitControls is
+    disabled during the move (otherwise its damping fights the tween), and any
+    manual drag cancels the move so the user always has the last word. */
+function CameraDirector({ preset }: { preset: CameraPreset }) {
+  const camera = useThree((state) => state.camera) as THREE.PerspectiveCamera
+  const controls = useThree((state) => state.controls) as unknown as OrbitLike | null
+  const active = useRef<CameraPreset | null>(null)
+  const tween = useRef<ShotTween | null>(null)
+
+  useEffect(() => {
+    if (!controls) return
+    const onStart = () => {
+      tween.current = null
+      controls.enabled = true
+    }
+    controls.addEventListener('start', onStart)
+    return () => controls.removeEventListener('start', onStart)
+  }, [controls])
+
+  useFrame((_, delta) => {
+    // null on the first frame, so a preset restored from localStorage also
+    // animates into place instead of silently disagreeing with the topbar.
+    if (active.current !== preset) {
+      active.current = preset
+      const shot = CAMERA_PRESETS[preset]
+      tween.current = {
+        t: 0,
+        fromPos: camera.position.clone(),
+        fromTarget: controls?.target.clone() ?? new THREE.Vector3(...CAMERA_PRESETS.studio.target),
+        fromFov: camera.fov,
+        toPos: new THREE.Vector3(...shot.position),
+        toTarget: new THREE.Vector3(...shot.target),
+        toFov: shot.fov,
+      }
+      if (controls) controls.enabled = false
+    }
+
+    const tw = tween.current
+    if (!tw) return
+    tw.t = Math.min(1, tw.t + delta / 0.72)
+    const k = easeInOut(tw.t)
+    const target = new THREE.Vector3().lerpVectors(tw.fromTarget, tw.toTarget, k)
+    camera.position.lerpVectors(tw.fromPos, tw.toPos, k)
+    camera.fov = tw.fromFov + (tw.toFov - tw.fromFov) * k
+    camera.updateProjectionMatrix()
+    camera.lookAt(target)
+    if (tw.t >= 1) {
+      tween.current = null
+      if (controls) {
+        controls.target.copy(tw.toTarget)
+        controls.enabled = true
+        controls.update()
+      }
+    }
+  })
+
+  return null
+}
+
 function Scene() {
   const snapshot = useMedusaStore(selectSnapshot)
   const selectedWorkerId = useMedusaStore((state) => state.selectedWorkerId)
@@ -620,6 +702,7 @@ function Scene() {
 
 export default function Workshop() {
   const closeAvatarEditor = useMedusaStore((state) => state.closeAvatarEditor)
+  const cameraPreset = useMedusaStore((state) => state.cameraPreset)
   return (
     <Canvas
       shadows
@@ -633,7 +716,7 @@ export default function Workshop() {
         )) return
         closeAvatarEditor()
       }}
-      camera={{ position: [0.35, 2.45, 8.15], fov: 41 }}
+      camera={{ position: CAMERA_PRESETS.studio.position, fov: CAMERA_PRESETS.studio.fov }}
       onCreated={({ scene, camera }) => {
         ;(window as unknown as Record<string, unknown>).__MEDUSA = { scene, camera }
       }}
@@ -688,13 +771,15 @@ export default function Workshop() {
       />
       <Scene />
       <OrbitControls
+        makeDefault
         enableDamping
         dampingFactor={0.08}
         minDistance={3}
         maxDistance={40}
         maxPolarAngle={Math.PI / 2.08}
-        target={[0, 0.95, 0.25]}
+        target={CAMERA_PRESETS.studio.target}
       />
+      <CameraDirector preset={cameraPreset} />
       <EffectComposer multisampling={4} frameBufferType={THREE.HalfFloatType}>
         {/* Ambient occlusion is what makes white-on-white read: without it
             every pale surface merges into the next one. */}

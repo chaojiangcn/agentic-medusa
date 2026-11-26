@@ -22,6 +22,47 @@ import type { AvatarConfig, AvatarTarget } from './appearance'
 const MAX_FRAMES = 600
 
 /**
+ * UI-local camera shots. Like appearance, a shot is a projection preference:
+ * it never reaches the App Server and never enters the append-only log.
+ * One table feeds the topbar, the keyboard shortcuts and the camera tween.
+ */
+export type CameraPreset = 'studio' | 'desk' | 'close' | 'wide'
+
+export interface CameraShot {
+  label: string
+  hint: string
+  position: [number, number, number]
+  target: [number, number, number]
+  fov: number
+}
+
+export const CAMERA_STORAGE_KEY = 'medusa.camera.v1'
+
+// The 3D canvas is full-bleed but the two side panels cover ~576 px of it, so
+// only the middle ~60% of the frame is actually readable. Every shot is
+// framed for that window, not for the raw canvas.
+export const CAMERA_PRESETS: Record<CameraPreset, CameraShot> = {
+  studio: {
+    label: '平视', hint: '房间空间感 · 快捷键 1',
+    position: [0.35, 2.45, 8.15], target: [0, 0.95, 0.25], fov: 41,
+  },
+  desk: {
+    label: '桌面', hint: '看清显示器与桌面陈设 · 快捷键 2',
+    position: [0, 7.0, 5.8], target: [0, 0.2, -0.9], fov: 44,
+  },
+  close: {
+    label: '近景', hint: '对准第一张工位与人物 · 快捷键 3',
+    position: [-1.58, 1.74, 2.95], target: [-2.02, 0.86, -0.78], fov: 33,
+  },
+  wide: {
+    label: '全景', hint: '整间工作室与后场陈设 · 快捷键 4',
+    // Close and low: a flatter angle compresses the floor between the desks
+    // and the camera, which was the emptiest part of the wide frame.
+    position: [0, 2.2, 7.6], target: [0, 1.0, -1.6], fov: 46,
+  },
+}
+
+/**
  * REST base for the App Server. Replay over a long append-only log is heavy
  * (one full projection per event), so the first paint comes from a single
  * snapshot fetch and live frames are polled as a safety net next to the
@@ -75,6 +116,10 @@ interface MedusaState {
   /** UI-local appearance: never sent to the App Server. */
   appearance: Record<string, Partial<AvatarConfig>>
   avatarEditor: AvatarTarget | null
+  /** UI-local camera shot, persisted in localStorage. */
+  cameraPreset: CameraPreset
+  setCameraPreset: (preset: CameraPreset) => void
+  hydrateCamera: () => void
   /** Clicking a device or camera in 3D asks the panel to focus that tab. */
   focusTool: string | null
   focusCamera: string | null
@@ -100,8 +145,13 @@ interface MedusaState {
   requestTab: (tab: string) => void
 }
 
-export const selectSnapshot = (state: MedusaState) =>
-  state.frames[state.cursor]?.snapshot ?? null
+export const selectSnapshot = (state: MedusaState) => {
+  // Clamp instead of trusting the cursor: the frame buffer is trimmed at the
+  // front, so a stale cursor can point past the end. Returning null there
+  // unmounts the whole 3D tree (every Html label included).
+  const index = Math.min(Math.max(state.cursor, 0), state.frames.length - 1)
+  return state.frames[index]?.snapshot ?? null
+}
 
 export const useMedusaStore = create<MedusaState>((set, get) => ({
   frames: [],
@@ -120,6 +170,7 @@ export const useMedusaStore = create<MedusaState>((set, get) => ({
   configHome: '—',
   appearance: {},
   avatarEditor: null,
+  cameraPreset: 'studio',
   focusTool: null,
   focusCamera: null,
   tabRequest: null,
@@ -211,10 +262,18 @@ export const useMedusaStore = create<MedusaState>((set, get) => ({
           .call<{ frames?: Frame[]; thread?: ThreadInfo }>('thread/resume', {})
           .then((res) => {
             if (Array.isArray(res?.frames) && res.frames.length > 0) {
-              set((state) => ({
-                frames: res.frames!.slice(-MAX_FRAMES),
-                cursor: state.playing ? res.frames!.length - 1 : state.cursor,
-              }))
+              set((state) => {
+                // Trimming and the cursor must agree. Measuring the cursor
+                // against the untrimmed length pointed past the end of the
+                // buffer, which blanked the snapshot and tore down the scene.
+                const frames = res.frames!.slice(-MAX_FRAMES)
+                return {
+                  frames,
+                  cursor: state.playing
+                    ? frames.length - 1
+                    : Math.min(state.cursor, frames.length - 1),
+                }
+              })
             }
           })
           .catch(() => undefined)
@@ -285,6 +344,26 @@ export const useMedusaStore = create<MedusaState>((set, get) => ({
 
   openAvatarEditor: (target) => set({ avatarEditor: target }),
   closeAvatarEditor: () => set({ avatarEditor: null }),
+
+  setCameraPreset: (preset) => {
+    try {
+      localStorage.setItem(CAMERA_STORAGE_KEY, preset)
+    } catch {
+      // Private mode / quota: the shot still applies for this session.
+    }
+    set({ cameraPreset: preset })
+  },
+
+  hydrateCamera: () => {
+    try {
+      const raw = localStorage.getItem(CAMERA_STORAGE_KEY)
+      if (raw === 'studio' || raw === 'desk' || raw === 'close' || raw === 'wide') {
+        set({ cameraPreset: raw })
+      }
+    } catch {
+      // A corrupt value just falls back to the eye-level shot.
+    }
+  },
   focusOnTool: (name) => set({ focusTool: name }),
   focusOnCamera: (id) => set({ focusCamera: id }),
   requestTab: (tab) =>

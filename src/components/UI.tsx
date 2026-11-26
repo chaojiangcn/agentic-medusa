@@ -1,7 +1,8 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { selectSnapshot, useMedusaStore } from '@/lib/store'
+import { CAMERA_PRESETS, selectSnapshot, useMedusaStore } from '@/lib/store'
+import type { CameraPreset } from '@/lib/store'
 import { AvatarEditor } from './AvatarEditor'
 import { eventDetail, eventLabel } from '@/lib/rpc'
 import type {
@@ -54,11 +55,31 @@ export function UI() {
   const [obsBusy, setObsBusy] = useState(false)
   const [obsResult, setObsResult] = useState<string | null>(null)
 
-  // Appearance lives in localStorage, so hydration must wait for the client.
-  // A click in the 3D scene can also ask this panel to switch tabs.
+  // Appearance and the camera shot live in localStorage, so hydration must
+  // wait for the client. A click in the 3D scene can also ask this panel to
+  // switch tabs.
   useEffect(() => {
     useMedusaStore.getState().hydrateAppearance()
+    useMedusaStore.getState().hydrateCamera()
   }, [])
+
+  // 1-4 jump between shots. Ignore keystrokes originating in a form field so
+  // typing an order title never yanks the camera out from under the user.
+  useEffect(() => {
+    const keys: Record<string, CameraPreset> = {
+      '1': 'studio', '2': 'desk', '3': 'close', '4': 'wide',
+    }
+    const onKey = (event: KeyboardEvent) => {
+      const el = event.target as HTMLElement | null
+      if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return
+      if (event.metaKey || event.ctrlKey || event.altKey) return
+      const preset = keys[event.key]
+      if (preset) useMedusaStore.getState().setCameraPreset(preset)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
   useEffect(() => {
     if (store.tabRequest) setTab(store.tabRequest.tab as typeof tab)
   }, [store.tabRequest])
@@ -230,6 +251,18 @@ export function UI() {
         <div className="brand">
           <b>Medusa</b>
           <span>流水线车间 · App Server 驱动</span>
+        </div>
+        <div className="view-switch" role="group" aria-label="镜头机位">
+          {(Object.keys(CAMERA_PRESETS) as CameraPreset[]).map((id, index) => (
+            <button
+              key={id}
+              className={store.cameraPreset === id ? 'active' : ''}
+              onClick={() => store.setCameraPreset(id)}
+              title={CAMERA_PRESETS[id].hint}
+            >
+              <span className="view-key">{index + 1}</span>{CAMERA_PRESETS[id].label}
+            </button>
+          ))}
         </div>
         <div className="chips">
           <span className={`chip ${connected ? 'ok' : 'bad'}`}>
