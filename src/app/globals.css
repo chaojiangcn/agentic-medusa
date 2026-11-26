@@ -29,10 +29,10 @@ button { cursor: pointer; }
   /* Own stacking context: 3D labels can rank among themselves without ever
      climbing above the side panels. */
   z-index: 1; isolation: isolate;
-  /* A soft ceiling glow: the 3D floor fades into the same value, so the scene
-     has depth instead of a flat sky. */
+  /* White studio cyclorama: the 3D floor fades into the same value, so the
+     room has no visible horizon and reads as an endless white set. */
   background:
-    radial-gradient(118% 86% at 50% 4%, #f7fbff 0%, #edf3f9 34%, #e2eaf2 66%, #d9e3ed 100%);
+    radial-gradient(120% 92% at 50% 2%, #ffffff 0%, #fdfefe 32%, #f4f7fb 66%, #e9eef5 100%);
 }
 .canvas-layer canvas { display: block; }
 .loading {
@@ -642,15 +642,15 @@ button { cursor: pointer; }
 .camera-tag { border-color: rgba(90, 90, 120, 0.42); color: #43435e; }
 .camera-tag.alert { border-color: rgba(192, 98, 93, 0.6); color: #9c4b47; }
 .dispatch-board {
-  background: rgba(25, 33, 46, 0.88);
-  border-color: rgba(118, 168, 232, 0.34);
+  background: rgba(255, 255, 255, 0.74);
+  border-color: rgba(124, 152, 186, 0.26);
   border-radius: 10px;
   padding: 6px 10px;
-  box-shadow: 0 0 20px rgba(64, 108, 176, 0.22), 0 2px 8px rgba(20, 30, 45, 0.3);
+  box-shadow: 0 2px 12px rgba(70, 92, 120, 0.12);
 }
-.dispatch-board span { color: #7e9cbf; }
-.dispatch-board b { color: #b8dcff; }
-.dispatch-board small { color: #93aecd; }
+.dispatch-board span { color: #93a1b2; }
+.dispatch-board b { color: #4b637a; }
+.dispatch-board small { color: #8b97a6; }
 .cam-rec { background: var(--bad); animation: rec-pulse 1.8s ease-in-out infinite; }
 @keyframes rec-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 

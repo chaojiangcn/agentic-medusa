@@ -2,23 +2,22 @@
 
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import {
-  ContactShadows, Environment, Grid, Html, Lightformer, OrbitControls, RoundedBox,
+  ContactShadows, Environment, Html, Lightformer, OrbitControls, RoundedBox,
 } from '@react-three/drei'
-import { Bloom, EffectComposer, Vignette } from '@react-three/postprocessing'
+import { Bloom, EffectComposer, N8AO, Vignette } from '@react-three/postprocessing'
 import * as THREE from 'three'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { selectSnapshot, useMedusaStore } from '@/lib/store'
 import { BOSS_KEY, resolveAvatar, workerKey } from '@/lib/appearance'
-import { Avatar } from './Avatar'
+import { Avatar, SEATED_Y } from './Avatar'
 import {
-  Cabinet, DeskSetup, OfficeChair, RoomShell, WallClock,
+  Bust, Credenza, DESK_D, DESK_H, Desk, DeskKit, Easel, Plant, RoomShell, ShelfUnit,
+  TaskChair, WallArt, WallClock, BoxStack,
 } from './OfficeSet'
 import type { Boss, CameraView, DispatchRecord, Stage, ToolView, Worker, WorkTask } from '@/lib/contract'
 
-// Deliberately muted: the backend colours are chart accents, not paint. A calm
-// low-saturation palette is what makes a scene read as an office rather than
-// a dashboard that happens to be 3D.
+// Deliberately muted: the backend colours are chart accents, not paint.
 const STATUS_COLOR: Record<string, string> = {
   busy: '#8b95e0',
   idle: '#a6b2c0',
@@ -26,7 +25,7 @@ const STATUS_COLOR: Record<string, string> = {
   paused: '#c9a05e',
 }
 
-function soften(hex: string, saturation = 0.4, lightness = 0.66): string {
+function soften(hex: string, saturation = 0.36, lightness = 0.72): string {
   const c = new THREE.Color(hex)
   const hsl = { h: 0, s: 0, l: 0 }
   c.getHSL(hsl)
@@ -34,69 +33,64 @@ function soften(hex: string, saturation = 0.4, lightness = 0.66): string {
   return `#${c.getHexString()}`
 }
 
-const SURFACE = '#e3d3bb'
-const METAL = '#9aa3ad'
+/// Stages arrive on a 10-unit span, which forces the camera so far back that a
+/// 1.3 m character ends up 50 px tall. The client projects them into a studio
+/// plan instead: three desks at three depths, each slightly off-axis. A rigid
+/// row reads as a spreadsheet; a staggered cluster reads as a room.
+const STAGE_LAYOUT = [
+  { x: -2.32, z: -0.72, rot: -0.27 },
+  { x: 0.12, z: 0.46, rot: 0.035 },
+  { x: 2.4, z: -0.5, rot: 0.4 },
+]
 
-function StagePlatform({ stage, highlighted }: { stage: Stage; highlighted: boolean }) {
+/// Where a worker sits, in the desk's local frame.
+const SEAT_Z = -0.9
+
+function seatAnchor(stage: Stage, index: number, offsetX: number) {
+  const tilt = STAGE_LAYOUT[index]?.rot ?? 0
+  const cos = Math.cos(tilt)
+  const sin = Math.sin(tilt)
+  return {
+    x: stage.position.x + offsetX * cos + SEAT_Z * sin,
+    z: stage.position.z - offsetX * sin + SEAT_Z * cos,
+    rot: tilt,
+  }
+}
+
+/** A white desk with a real top, a drawer pedestal and a task chair behind
+    it. The nameplate moved from a floating sign to the front edge. */
+function WorkStation({
+  stage, index, devices, highlighted,
+}: {
+  stage: Stage
+  index: number
+  devices: { tool: ToolView; recent: boolean }[]
+  highlighted: boolean
+}) {
   const accent = useMemo(() => soften(stage.color), [stage.color])
-  const pool = useMemo(() => soften(stage.color, 0.45, 0.8), [stage.color])
+  const pool = useMemo(() => soften(stage.color, 0.4, 0.86), [stage.color])
   const [hovered, setHovered] = useState(false)
   const requestTab = useMedusaStore((state) => state.requestTab)
+  const tilt = STAGE_LAYOUT[index]?.rot ?? 0
   return (
-    <group
-      position={[stage.position.x, stage.position.y, stage.position.z]}
-      onClick={(event) => {
-        event.stopPropagation()
-        requestTab('workers')
-      }}
-      onPointerOver={(event) => {
-        event.stopPropagation()
-        setHovered(true)
-        document.body.style.cursor = 'pointer'
-      }}
-      onPointerOut={() => {
-        setHovered(false)
-        document.body.style.cursor = 'auto'
-      }}
-    >
-      {/* A soft pool of light on the floor ties the station to the ground. */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.014, 0]}>
-        <circleGeometry args={[2.0, 48]} />
-        <meshBasicMaterial color={pool} transparent opacity={hovered ? 0.4 : highlighted ? 0.34 : 0.2} depthWrite={false} />
-      </mesh>
-      {/* A recessed plinth, a light top and a thin edge band: three layers
-          read as furniture instead of one thick crate. */}
-      <mesh position={[0, 0.028, 0]}>
-        <boxGeometry args={[2.86, 0.055, 2.16]} />
-        <meshStandardMaterial color="#a98f6d" roughness={0.88} />
-      </mesh>
-      <RoundedBox args={[2.62, 0.05, 1.94]} radius={0.016} smoothness={3} position={[0, 0.025, 0]} castShadow receiveShadow>
-        <meshStandardMaterial color="#9dabbc" roughness={0.85} metalness={0.05} />
-      </RoundedBox>
-      <RoundedBox name="stage-top" args={[2.8, 0.12, 2.1]} radius={0.035} smoothness={4} position={[0, 0.115, 0]} castShadow receiveShadow>
-        <meshStandardMaterial color={SURFACE} roughness={0.62} metalness={0.04} />
-      </RoundedBox>
-      <mesh position={[0, 0.132, 0]} receiveShadow>
-        <boxGeometry args={[2.58, 0.01, 1.88]} />
-        <meshStandardMaterial color={accent} roughness={0.55} transparent opacity={hovered ? 0.34 : highlighted ? 0.26 : 0.12} />
-      </mesh>
-      {/* Desk dressing: monitor, keyboard, notes, lamp. A station has to look
-          like a place someone works at, not a pedestal. */}
-      <DeskSetup accent={accent} />
-      {/* Front edge light: the only emissive strip, so Bloom has a reason. */}
-      <mesh position={[0, 0.045, 1.053]}>
-        <boxGeometry args={[2.5, 0.022, 0.014]} />
-        <meshStandardMaterial
-          color={accent}
-          emissive={accent}
-          emissiveIntensity={highlighted ? 1.6 : 0.3}
-          roughness={0.4}
+    <group position={[stage.position.x, 0, stage.position.z]} rotation={[0, tilt, 0]}>
+      {/* a barely-there pool of accent light on the floor */}
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.007, 0]} raycast={() => {}}>
+        <circleGeometry args={[1.55, 40]} />
+        <meshBasicMaterial
+          color={pool}
+          transparent
+          opacity={hovered ? 0.32 : highlighted ? 0.26 : 0.1}
+          depthWrite={false}
         />
       </mesh>
-      {/* A nameplate on the front edge, not a floating sign behind the desk.
-          At y=0.95 / z=-1.05 this label projected straight onto the worker's
-          face at any camera distance. */}
-      <Html center zIndexRange={[5, 0]} position={[0, 0.2, 1.12]}>
+      <Desk accent={accent} />
+      <DeskKit accent={accent} />
+      <TaskChair x={0} z={-0.9} rotation={0.05} accent={highlighted ? accent : '#e7ebf1'} />
+      {devices.map(({ tool, recent }, i) => (
+        <ToolDevice key={tool.name} tool={tool} x={0.52 + i * 0.28} recent={recent} />
+      ))}
+      <Html center zIndexRange={[5, 0]} position={[0, 0.46, DESK_D / 2 + 0.02]}>
         <div
           className="stage-tag"
           style={{ '--tag-accent': accent } as CSSProperties}
@@ -111,15 +105,15 @@ function StagePlatform({ stage, highlighted }: { stage: Stage; highlighted: bool
 
 function WorkerFigure({
   worker,
-  stage,
+  anchor,
   selected,
-  offsetX = 0,
+  tint,
   labelLift = 0,
 }: {
   worker: Worker
-  stage?: Stage
+  anchor: { x: number; z: number; rot: number }
   selected: boolean
-  offsetX?: number
+  tint: string
   labelLift?: number
 }) {
   const group = useRef<THREE.Group>(null)
@@ -131,16 +125,19 @@ function WorkerFigure({
   const editorTarget = useMedusaStore((state) => state.avatarEditor)
   const isEditing = editorTarget?.kind === 'worker' && editorTarget.id === worker.id
   const statusColor = STATUS_COLOR[worker.status] ?? STATUS_COLOR.busy
-  const avatar = resolveAvatar(appearance, workerKey(worker.id), statusColor)
+  const avatar = resolveAvatar(appearance, workerKey(worker.id), tint)
   const color = avatar.effectiveColor
+  // Only the built-in human has a seated rig; every other silhouette stands
+  // behind the desk on the floor, which still reads correctly for a chibi.
+  const seated = avatar.model === 'human'
+  const baseY = seated ? SEATED_Y : 0.645
 
   useFrame(({ clock }) => {
     if (!group.current) return
     const t = clock.getElapsedTime()
-    const bob = worker.status === 'busy' ? 0.022 : 0.01
-    // Feet land on the desk surface (0.27), not on the old capsule centre.
-    group.current.position.y = (stage?.position.y ?? 0) + 0.832 + Math.sin(t * 2 + worker.id.length) * bob
-    group.current.rotation.y = Math.sin(t * 0.6) * 0.16
+    const bob = worker.status === 'busy' ? 0.007 : 0.003
+    group.current.position.y = baseY + Math.sin(t * 1.6 + worker.id.length) * bob
+    group.current.rotation.y = anchor.rot + Math.sin(t * 0.45 + worker.id.length) * 0.045
     if (halo.current) {
       const m = halo.current.material as THREE.MeshBasicMaterial
       m.opacity = isEditing
@@ -152,7 +149,7 @@ function WorkerFigure({
   return (
     <group
       ref={group}
-      position={[(stage?.position.x ?? 0) + offsetX, 0.82, (stage?.position.z ?? 0) - 0.15]}
+      position={[anchor.x, baseY, anchor.z]}
       onClick={(event) => {
         event.stopPropagation()
         selectWorker(worker.id)
@@ -170,19 +167,23 @@ function WorkerFigure({
     >
       {/* Invisible hit volume: a humanoid has gaps between its limbs, and a
           click should not disappear into them. */}
-      <mesh position={[0, 0.14, 0]}>
-        <capsuleGeometry args={[0.44, 1.0, 4, 10]} />
+      <mesh position={[0, seated ? 0.54 : 0.5, 0]}>
+        <capsuleGeometry args={[0.42, seated ? 0.5 : 0.68, 4, 10]} />
         <meshBasicMaterial transparent opacity={0} depthWrite={false} />
       </mesh>
-      <Avatar model={avatar.model} color={color} scale={avatar.scale} />
-      <mesh ref={halo} rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.56, 0]}>
-        <ringGeometry args={[0.44, 0.68, 40]} />
-        <meshBasicMaterial color={color} transparent opacity={0} side={THREE.DoubleSide} depthWrite={false} />
+      <Avatar model={avatar.model} color={color} scale={avatar.scale} pose={seated ? 'sit' : 'stand'} />
+      <mesh
+        ref={halo}
+        rotation={[-Math.PI / 2, 0, 0]}
+        position={[0, seated ? -0.505 : -0.638, 0]}
+        raycast={() => {}}
+      >
+        <ringGeometry args={[0.44, 0.66, 40]} />
+        <meshBasicMaterial color={statusColor} transparent opacity={0} side={THREE.DoubleSide} depthWrite={false} />
       </mesh>
-      <Html center zIndexRange={[30, 20]} position={[0, 1.72 + labelLift, 0]}>
+      <Html center zIndexRange={[30, 20]} position={[0, (seated ? 0.92 : 1.02) + labelLift, 0]}>
         <div
           className="worker-tag"
-          style={{ position: 'relative', top: '-30px' }}
           onClick={() => {
             selectWorker(worker.id)
             openAvatarEditor({ kind: 'worker', id: worker.id, name: worker.name, status: worker.status })
@@ -200,31 +201,25 @@ function WorkerFigure({
 /// unmount a crate's Html label when the order list shifts.
 const CRATE_SLOTS = 10
 
-/// Stages arrive on a 10-unit span, which forces the camera so far back that a
-/// 1.3 m character ends up 50 px tall. Narrowing the span on the client keeps
-/// the log authoritative while giving the camera a desk-sized room to work in.
-const STAGE_SPREAD = 0.6
-const SPACING = 5 * STAGE_SPREAD
-
 function TaskCrate({ task, offset, stages }: { task: WorkTask | null; offset: number; stages: Stage[] }) {
-  // The slot is permanent; only its contents change. Dropping the group (or
-  // keying it by task id) unmounts a drei Html root mid-render, which trips
-  // React's sync-unmount guard every time an order leaves the floor.
   const done = !task || task.status === 'done' || task.status === 'failed'
-  const base = stages[Math.min(task?.stageIndex ?? 0, stages.length - 1)]?.position.x ?? 0
-  const x = task ? base + task.progress * SPACING : stages[0]?.position.x ?? 0
+  const slot = Math.min(task?.stageIndex ?? 0, stages.length - 1)
+  const next = Math.min(slot + 1, stages.length - 1)
+  const from = stages[slot]?.position.x ?? 0
+  const to = stages[next]?.position.x ?? from
+  const x = task ? from + (to - from) * task.progress : stages[0]?.position.x ?? 0
   const failed = task?.status === 'failed'
-  const color = failed ? '#cf6f6b' : '#6a86a8'
+  const color = failed ? '#cf6f6b' : '#dfe6ee'
   return (
-    <group visible={!done} position={[x, 0.6, 3.2 + offset]}>
-      <RoundedBox args={[0.46, 0.38, 0.46]} radius={0.06} smoothness={3} castShadow>
-        <meshStandardMaterial color={color} roughness={0.62} metalness={0.08} />
+    <group visible={!done} position={[x, 0.13, 3.15 + offset]}>
+      <RoundedBox args={[0.4, 0.32, 0.4]} radius={0.05} smoothness={3} position={[0, 0.16, 0]} castShadow>
+        <meshStandardMaterial color={color} roughness={0.62} metalness={0.05} />
       </RoundedBox>
-      <mesh position={[0, 0.2, 0]}>
-        <boxGeometry args={[0.3, 0.012, 0.02]} />
-        <meshStandardMaterial color="#e8eef4" roughness={0.5} />
+      <mesh position={[0, 0.325, 0]}>
+        <boxGeometry args={[0.26, 0.01, 0.02]} />
+        <meshStandardMaterial color={failed ? '#f0c9c6' : '#8fa0b3'} roughness={0.5} />
       </mesh>
-      <Html center zIndexRange={[5, 0]} position={[0, 0.52, 0]}>
+      <Html center zIndexRange={[5, 0]} position={[0, 0.44, 0]}>
         <div className="task-tag" style={{ opacity: done ? 0 : 1 }}>{task?.id ?? ''}</div>
       </Html>
     </group>
@@ -233,8 +228,9 @@ function TaskCrate({ task, offset, stages }: { task: WorkTask | null; offset: nu
 
 function BossFigure({ boss }: { boss: Boss }) {
   const group = useRef<THREE.Group>(null)
-  const targetX = useRef(boss.x)
-  targetX.current = boss.x
+  const aisleX = boss.x < 0 ? -1.02 : 1.32
+  const targetX = useRef(aisleX)
+  targetX.current = boss.x < 0 ? -1.02 : 1.32
   const [hovered, setHovered] = useState(false)
   const appearance = useMedusaStore((state) => state.appearance)
   const openAvatarEditor = useMedusaStore((state) => state.openAvatarEditor)
@@ -259,7 +255,7 @@ function BossFigure({ boss }: { boss: Boss }) {
   return (
     <group
       ref={group}
-      position={[boss.x, 0.56, boss.z * 0.8]}
+      position={[aisleX, 0.645, -2.62 + boss.z * 0.02]}
       onClick={(event) => {
         event.stopPropagation()
         openAvatarEditor({ kind: 'boss', name: '老板', status: boss.mode })
@@ -274,16 +270,16 @@ function BossFigure({ boss }: { boss: Boss }) {
         document.body.style.cursor = 'auto'
       }}
     >
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.55, 0]}>
-        <circleGeometry args={[0.78, 40]} />
-        <meshBasicMaterial color={color} transparent opacity={hovered || isEditing ? 0.28 : 0.14} depthWrite={false} />
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.638, 0]} raycast={() => {}}>
+        <circleGeometry args={[0.7, 40]} />
+        <meshBasicMaterial color={color} transparent opacity={hovered || isEditing ? 0.26 : 0.12} depthWrite={false} />
       </mesh>
-      <mesh position={[0, 0.1, 0]}>
-        <capsuleGeometry args={[0.5, 0.95, 4, 10]} />
+      <mesh position={[0, 0.55, 0]}>
+        <capsuleGeometry args={[0.45, 0.66, 4, 10]} />
         <meshBasicMaterial transparent opacity={0} depthWrite={false} />
       </mesh>
-      <Avatar model={avatar.model} color={color} boss scale={avatar.scale * 1.12} />
-      <Html center zIndexRange={[32, 22]} position={[0, 1.86, 0]}>
+      <Avatar model={avatar.model} color={color} boss scale={avatar.scale * 1.05} />
+      <Html center zIndexRange={[32, 22]} position={[0, 1.06, 0]}>
         <div
           className={`boss-tag ${boss.mode}`}
           onClick={() => openAvatarEditor({ kind: 'boss', name: '老板', status: boss.mode })}
@@ -298,47 +294,47 @@ function Conveyor() {
   // Stripes are spaced exactly one unit apart, so shifting the whole group by
   // a fractional unit creates an endless belt without touching every child.
   useFrame(({ clock }) => {
-    if (stripes.current) stripes.current.position.x = (clock.getElapsedTime() * 0.42) % 1
+    if (stripes.current) stripes.current.position.x = (clock.getElapsedTime() * 0.4) % 1
   })
   return (
-    <group position={[0, 0.15, 3.2]}>
-      <RoundedBox args={[11, 0.3, 1.4]} radius={0.09} smoothness={3} receiveShadow castShadow>
-        <meshStandardMaterial color="#d5dce3" roughness={0.78} metalness={0.06} />
+    <group position={[0, 0, 3.15]}>
+      <RoundedBox args={[11.6, 0.09, 1.2]} radius={0.028} smoothness={3} position={[0, 0.045, 0]} receiveShadow castShadow>
+        <meshStandardMaterial color="#f6f8fb" roughness={0.5} metalness={0.04} />
       </RoundedBox>
-      <mesh position={[0, 0.158, 0]}>
-        <boxGeometry args={[10.5, 0.016, 1.2]} />
-        <meshStandardMaterial color="#b9c4cf" roughness={0.6} metalness={0.12} />
+      <mesh position={[0, 0.083, 0]}>
+        <boxGeometry args={[11.2, 0.012, 1.02]} />
+        <meshStandardMaterial color="#eaeef4" roughness={0.62} />
       </mesh>
       <group ref={stripes}>
         {Array.from({ length: 13 }, (_, i) => (
-          <mesh key={i} position={[-6 + i, 0.17, 0]}>
-            <boxGeometry args={[0.045, 0.012, 1.22]} />
-            <meshStandardMaterial color="#f4f7fa" roughness={0.8} />
+          <mesh key={i} position={[-6 + i, 0.088, 0]}>
+            <boxGeometry args={[0.04, 0.008, 1.04]} />
+            <meshStandardMaterial color="#d7dee8" roughness={0.8} />
           </mesh>
         ))}
       </group>
-      {/* Side rails make it read as a machine, not a plank. */}
-      {[-0.76, 0.76].map((z) => (
-        <mesh key={z} position={[0, 0.19, z]} castShadow>
-          <boxGeometry args={[15, 0.1, 0.06]} />
-          <meshStandardMaterial color={METAL} roughness={0.42} metalness={0.55} />
+      {[-0.65, 0.65].map((z) => (
+        <mesh key={z} position={[0, 0.105, z]} castShadow>
+          <boxGeometry args={[11.2, 0.07, 0.035]} />
+          <meshStandardMaterial color="#c6ced8" roughness={0.35} metalness={0.5} />
         </mesh>
       ))}
     </group>
   )
 }
 
+/** A small white device on the desk. The tool lives on the worker's desk
+    instead of on a plinth, so the scene reads as a workstation. */
 function ToolDevice({ tool, x, recent }: { tool: ToolView; x: number; recent: boolean }) {
   const [hovered, setHovered] = useState(false)
   const focusOnTool = useMedusaStore((state) => state.focusOnTool)
   const requestTab = useMedusaStore((state) => state.requestTab)
   const color = recent ? '#5f9380' : tool.permission === 'approval' ? '#b58a4c' : '#9aa5b1'
-  const screen = recent ? '#c8ecd9' : '#e5ebf1'
   const showReceipt = recent && Boolean(tool.lastReceipt)
-  const receipt = tool.lastReceipt.length > 14 ? tool.lastReceipt.slice(0, 13) + '…' : tool.lastReceipt
+  const receipt = tool.lastReceipt.length > 12 ? tool.lastReceipt.slice(0, 11) + '…' : tool.lastReceipt
   return (
     <group
-      position={[x, 0.24, 0.95]}
+      position={[x, DESK_H, -0.28]}
       onClick={(event) => {
         event.stopPropagation()
         focusOnTool(tool.name)
@@ -355,42 +351,35 @@ function ToolDevice({ tool, x, recent }: { tool: ToolView; x: number; recent: bo
       }}
     >
       <mesh position={[0, 0.1, 0]}>
-        <boxGeometry args={[0.72, 0.82, 0.62]} />
+        <boxGeometry args={[0.3, 0.36, 0.28]} />
         <meshBasicMaterial transparent opacity={0} depthWrite={false} />
       </mesh>
-      <RoundedBox args={[0.5, 0.44, 0.38]} radius={0.055} smoothness={3} castShadow>
-        <meshStandardMaterial color={color} roughness={0.5} metalness={0.18} />
+      <RoundedBox args={[0.25, 0.17, 0.21]} radius={0.026} smoothness={3} position={[0, 0.09, 0]} castShadow>
+        <meshStandardMaterial color="#fdfdfe" roughness={0.42} metalness={0.06} />
       </RoundedBox>
-      <mesh position={[0, 0.06, 0.196]}>
-        <planeGeometry args={[0.34, 0.19]} />
+      <mesh position={[0, 0.092, 0.106]}>
+        <planeGeometry args={[0.18, 0.11]} />
         <meshStandardMaterial
-          color={screen}
-          emissive={recent ? '#4f9e7c' : '#000000'}
-          emissiveIntensity={recent ? 0.5 : 0}
+          color={recent ? '#e2f4ec' : '#f2f7fd'}
+          emissive={recent ? '#8fd9bd' : '#000000'}
+          emissiveIntensity={recent ? 0.45 : 0}
           roughness={0.28}
         />
       </mesh>
-      <mesh position={[0, 0.27, 0]}>
-        <cylinderGeometry args={[0.024, 0.024, 0.12, 8]} />
-        <meshStandardMaterial color={METAL} metalness={0.6} roughness={0.35} />
+      <mesh position={[0, 0.128, 0.108]}>
+        <boxGeometry args={[0.1, 0.008, 0.002]} />
+        <meshBasicMaterial color={color} transparent opacity={0.9} />
       </mesh>
-      <mesh position={[0.18, 0.28, 0.1]}>
-        <sphereGeometry args={[0.038, 12, 10]} />
-        <meshStandardMaterial
-          color={recent ? '#8fe0b6' : '#a9b3bd'}
-          emissive={recent ? '#3ec98c' : '#000000'}
-          emissiveIntensity={recent ? 1.6 : 0}
-        />
+      <mesh position={[0.09, 0.152, 0.045]}>
+        <sphereGeometry args={[0.016, 10, 8]} />
+        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={recent ? 1.4 : 0.35} roughness={0.3} />
       </mesh>
-      {/* The receipt label stays mounted on purpose: drei's Html unmounts its
-          React root synchronously, which trips React's "unmount while
-          rendering" guard when it happens on a snapshot update. Fade it. */}
-      <Html center zIndexRange={[5, 0]} position={[0, 0.82, 0]}>
+      <Html center zIndexRange={[5, 0]} position={[0, 0.52, 0]}>
         <div className="tool-receipt" style={{ opacity: showReceipt ? 1 : 0 }}>
           {showReceipt ? receipt : ''}
         </div>
       </Html>
-      <Html center zIndexRange={[5, 0]} position={[0, -0.36, 0]}>
+      <Html center zIndexRange={[5, 0]} position={[0, 0.3, 0]}>
         <div
           className={'tool-tag' + (recent ? ' active' : '') + (hovered ? ' hover' : '')}
           onClick={() => { focusOnTool(tool.name); requestTab('tools') }}
@@ -400,38 +389,24 @@ function ToolDevice({ tool, x, recent }: { tool: ToolView; x: number; recent: bo
   )
 }
 
+/** Wall-mounted dispatch board. A dark slab would be the only black object in
+    an otherwise white room, so the screen is pale and the frame is white. */
 function DispatchBoard({ record }: { record?: DispatchRecord }) {
   const requestTab = useMedusaStore((state) => state.requestTab)
   return (
-    <group position={[0, 0, -3.3]}>
-      {/* A plinth so the big screen stands on the floor instead of floating. */}
-      <RoundedBox args={[2.9, 0.12, 0.72]} radius={0.035} smoothness={3} position={[0, 0.06, 0]} castShadow receiveShadow>
-        <meshStandardMaterial color="#a7b4c3" roughness={0.72} metalness={0.12} />
+    <group position={[0, 0, -7.62]}>
+      <RoundedBox args={[3.3, 1.5, 0.1]} radius={0.035} smoothness={3} position={[0, 2.42, 0]} castShadow>
+        <meshStandardMaterial color="#fbfcfe" roughness={0.4} metalness={0.12} />
       </RoundedBox>
-      <RoundedBox args={[3.7, 1.2, 0.16]} radius={0.05} smoothness={4} position={[0, 2.25, 0]} castShadow>
-        <meshStandardMaterial color="#4a4a68" roughness={0.46} metalness={0.22} />
-      </RoundedBox>
-      <mesh position={[0, 2.25, 0.088]}>
-        <planeGeometry args={[3.42, 0.98]} />
-        <meshStandardMaterial
-          color="#1d2735"
-          emissive="#3f6bb0"
-          emissiveIntensity={0.3}
-          roughness={0.26}
-          metalness={0.2}
-        />
+      <mesh position={[0, 2.42, 0.056]}>
+        <planeGeometry args={[3.1, 1.3]} />
+        <meshStandardMaterial color="#eef5fd" emissive="#dceafb" emissiveIntensity={0.45} roughness={0.24} />
       </mesh>
-      <mesh position={[0, 2.25, 0.09]}>
-        <boxGeometry args={[3.5, 0.02, 0.014]} />
-        <meshStandardMaterial color="#8f9ae8" emissive="#8f9ae8" emissiveIntensity={0.7} />
+      <mesh position={[0, 2.42, 0.062]}>
+        <boxGeometry args={[3.12, 0.012, 0.004]} />
+        <meshBasicMaterial color="#7f9fc0" transparent opacity={0.5} />
       </mesh>
-      {[-1.3, 1.3].map((x) => (
-        <mesh key={x} position={[x, 1.4, 0]} castShadow>
-          <cylinderGeometry args={[0.035, 0.045, 1.8, 10]} />
-          <meshStandardMaterial color={METAL} metalness={0.55} roughness={0.4} />
-        </mesh>
-      ))}
-      <Html center zIndexRange={[5, 0]} position={[0, 2.25, 0.13]}>
+      <Html center zIndexRange={[5, 0]} position={[0, 2.42, 0.09]}>
         <div className="dispatch-board" onClick={() => requestTab('dispatch')}>
           <span>派单台 / DISPATCH</span>
           <b>{record ? `${record.taskId} → ${record.stageId}` : '待命中'}</b>
@@ -442,31 +417,21 @@ function DispatchBoard({ record }: { record?: DispatchRecord }) {
   )
 }
 
+/** Observation camera on a studio light stand. Three fixed viewpoints, shown
+    at the scale of the room rather than the raw backend coordinates (which
+    put them 4.5 m up and 7.8 m out, i.e. outside the frame). */
 function CameraRig({ camera }: { camera: CameraView }) {
-  const lamp = useRef<THREE.Mesh>(null)
   const [hovered, setHovered] = useState(false)
   const focusOnCamera = useMedusaStore((state) => state.focusOnCamera)
   const requestTab = useMedusaStore((state) => state.requestTab)
-  useFrame(({ clock }) => {
-    if (!lamp.current) return
-    const mat = lamp.current.material as THREE.MeshStandardMaterial
-    const t = clock.getElapsedTime()
-    // Blinking REC lamp; faster when the camera has something to report.
-    mat.emissiveIntensity = camera.status === 'alert'
-      ? 0.9 + Math.sin(t * 8) * 0.5
-      : 0.35 + Math.sin(t * 2.5) * 0.2
-  })
+  const x = camera.position.x * 0.45
+  const z = -3.2 - (camera.position.z + 1.2) * 0.16
   const alert = camera.status === 'alert'
-  const color = alert ? '#c0625d' : '#5a5a78'
-  // Fixed viewpoints lean inward so their cones cover the shop floor.
-  const tilt: [number, number, number] = camera.position.x < -1
-    ? [0, 0, 0.3]
-    : camera.position.x > 1
-      ? [0, 0, -0.3]
-      : [-0.34, 0, 0]
+  const color = alert ? '#c0625d' : '#dfe5ec'
+  const tilt: [number, number, number] = x < -1 ? [0.2, 0, 0.32] : x > 1 ? [0.2, 0, -0.32] : [0.32, 0, 0]
   return (
     <group
-      position={[camera.position.x, camera.position.y, camera.position.z]}
+      position={[x, 0, z]}
       onClick={(event) => {
         event.stopPropagation()
         focusOnCamera(camera.id)
@@ -482,43 +447,48 @@ function CameraRig({ camera }: { camera: CameraView }) {
         document.body.style.cursor = 'auto'
       }}
     >
-      <mesh position={[0, 0.5, 0]}>
-        <boxGeometry args={[0.9, 1.5, 0.9]} />
+      <mesh position={[0, 1.1, 0]}>
+        <boxGeometry args={[0.5, 2.3, 0.5]} />
         <meshBasicMaterial transparent opacity={0} depthWrite={false} />
       </mesh>
-      <mesh position={[0, 0.9, 0]}>
-        <cylinderGeometry args={[0.03, 0.03, 1.8, 8]} />
-        <meshStandardMaterial color={METAL} metalness={0.6} roughness={0.4} />
+      <mesh position={[0, 0.02, 0]} castShadow>
+        <cylinderGeometry args={[0.16, 0.19, 0.04, 20]} />
+        <meshStandardMaterial color="#e6ebf1" roughness={0.5} metalness={0.15} />
       </mesh>
-      <RoundedBox args={[0.62, 0.34, 0.42]} radius={0.06} smoothness={3} position={[0, -0.05, 0]} castShadow>
-        <meshStandardMaterial color={color} roughness={0.48} metalness={0.16} />
-      </RoundedBox>
-      <mesh position={[0, -0.05, -0.32]} rotation={[Math.PI / 2, 0, 0]}>
-        <cylinderGeometry args={[0.14, 0.19, 0.3, 16]} />
-        <meshStandardMaterial color="#3f4450" roughness={0.5} metalness={0.3} />
+      <mesh position={[0, 1.05, 0]} castShadow>
+        <cylinderGeometry args={[0.016, 0.022, 2.1, 10]} />
+        <meshStandardMaterial color="#c9d1da" metalness={0.5} roughness={0.35} />
       </mesh>
-      <mesh position={[0, -0.05, -0.48]} rotation={[Math.PI / 2, 0, 0]}>
-        <cylinderGeometry args={[0.11, 0.11, 0.02, 16]} />
-        <meshStandardMaterial color={alert ? '#f3cecb' : '#cdd6f2'} roughness={0.25} metalness={0.2} />
-      </mesh>
-      <mesh ref={lamp} position={[0.24, 0.11, -0.22]}>
-        <sphereGeometry args={[0.055, 12, 10]} />
-        <meshStandardMaterial color="#e8796f" emissive="#e84a3c" emissiveIntensity={0.6} />
-      </mesh>
+      <group position={[0, 2.12, 0]} rotation={tilt}>
+        <RoundedBox args={[0.26, 0.19, 0.34]} radius={0.04} smoothness={3} castShadow>
+          <meshStandardMaterial color="#fdfdfe" roughness={0.4} metalness={0.1} />
+        </RoundedBox>
+        <mesh position={[0, -0.02, 0.16]} rotation={[Math.PI / 2, 0, 0]}>
+          <cylinderGeometry args={[0.05, 0.062, 0.08, 16]} />
+          <meshStandardMaterial color="#7d8794" roughness={0.4} metalness={0.3} />
+        </mesh>
+        <mesh position={[0, -0.02, 0.205]} rotation={[Math.PI / 2, 0, 0]}>
+          <sphereGeometry args={[0.042, 16, 12]} />
+          <meshStandardMaterial color={alert ? '#f0c9c6' : '#dbe7f6'} roughness={0.2} metalness={0.2} />
+        </mesh>
+        <mesh position={[0.1, 0.085, 0.06]}>
+          <sphereGeometry args={[0.016, 10, 8]} />
+          <meshStandardMaterial color="#e8796f" emissive="#e84a3c" emissiveIntensity={alert ? 1.6 : 0.7} />
+        </mesh>
+      </group>
       {/* A translucent cone: what this viewpoint can see. It is a hint, not
           a real frustum — the actual record is the append-only log. */}
-      {/* The cone is decoration: it must not swallow clicks on the floor. */}
-      <mesh position={[0, -1.75, 0]} rotation={tilt} raycast={() => {}}>
-        <coneGeometry args={[1.45, 3.5, 24, 1, true]} />
+      <mesh position={[0, 0.55, 0]} rotation={[tilt[0] * 0.4, 0, tilt[2] * 0.4]} raycast={() => {}}>
+        <coneGeometry args={[1.5, 3.1, 24, 1, true]} />
         <meshBasicMaterial
-          color={alert ? '#c0625d' : '#7f8ad6'}
+          color={alert ? '#c0625d' : '#9fb6d8'}
           transparent
-          opacity={0.055}
+          opacity={0.05}
           side={THREE.DoubleSide}
           depthWrite={false}
         />
       </mesh>
-      <Html center zIndexRange={[5, 0]} position={[0, 0.7, 0]}>
+      <Html center zIndexRange={[5, 0]} position={[0, 2.42, 0]}>
         <div
           className={'camera-tag' + (alert ? ' alert' : '') + (hovered ? ' hover' : '')}
           onClick={() => { focusOnCamera(camera.id); requestTab('observe') }}
@@ -526,80 +496,6 @@ function CameraRig({ camera }: { camera: CameraView }) {
           <span className="cam-rec" />{camera.label} · {alert ? '盲区' : 'REC'}
         </div>
       </Html>
-    </group>
-  )
-}
-
-const PLANT_LEAVES: [number, number, number, number][] = [
-  [0, 0.54, 0, 0.28],
-  [0.18, 0.7, 0.08, 0.22],
-  [-0.16, 0.72, -0.06, 0.2],
-  [0.05, 0.88, -0.1, 0.17],
-]
-
-/// Procedural office dressing. No downloaded assets, no licence to track, and
-/// it scales with the scene instead of fighting the data-driven layout.
-function OfficePlant({ x, z, scale = 1 }: { x: number; z: number; scale?: number }) {
-  return (
-    <group position={[x, 0, z]} scale={scale}>
-      <RoundedBox args={[0.46, 0.42, 0.46]} radius={0.08} smoothness={3} castShadow receiveShadow>
-        <meshStandardMaterial color="#cbc4b8" roughness={0.86} />
-      </RoundedBox>
-      <mesh position={[0, 0.22, 0]}>
-        <cylinderGeometry args={[0.2, 0.2, 0.035, 20]} />
-        <meshStandardMaterial color="#6d6457" roughness={1} />
-      </mesh>
-      {PLANT_LEAVES.map(([lx, ly, lz, r], i) => (
-        <mesh key={i} position={[lx, ly, lz]} castShadow>
-          <icosahedronGeometry args={[r, 1]} />
-          <meshStandardMaterial color={i % 2 ? '#7f9b7d' : '#6d8b72'} roughness={0.84} flatShading />
-        </mesh>
-      ))}
-    </group>
-  )
-}
-
-function FloorLamp({ x, z }: { x: number; z: number }) {
-  return (
-    <group position={[x, 0, z]}>
-      <mesh position={[0, 0.04, 0]} castShadow>
-        <cylinderGeometry args={[0.25, 0.29, 0.08, 24]} />
-        <meshStandardMaterial color={METAL} metalness={0.55} roughness={0.4} />
-      </mesh>
-      <mesh position={[0, 1.05, 0]} castShadow>
-        <cylinderGeometry args={[0.032, 0.032, 2, 12]} />
-        <meshStandardMaterial color={METAL} metalness={0.6} roughness={0.35} />
-      </mesh>
-      <mesh position={[0, 2.12, 0]} castShadow>
-        <coneGeometry args={[0.4, 0.42, 24, 1, true]} />
-        <meshStandardMaterial
-          color="#f1eee6"
-          side={THREE.DoubleSide}
-          roughness={0.72}
-          emissive="#ffe6bd"
-          emissiveIntensity={0.22}
-        />
-      </mesh>
-      <mesh position={[0, 1.98, 0]}>
-        <sphereGeometry args={[0.11, 16, 12]} />
-        <meshStandardMaterial color="#fff1d4" emissive="#ffd28a" emissiveIntensity={1.5} />
-      </mesh>
-      <pointLight position={[0, 1.98, 0]} intensity={2.4} distance={7} color="#ffe6bd" />
-    </group>
-  )
-}
-
-function Partition({ x }: { x: number }) {
-  return (
-    <group position={[x, 0, -2.05]}>
-      <mesh position={[0, 0.76, 0]} castShadow>
-        <boxGeometry args={[3.3, 1.4, 0.07]} />
-        <meshStandardMaterial color="#dce4ec" transparent opacity={0.4} roughness={0.32} metalness={0.06} />
-      </mesh>
-      <mesh position={[0, 1.47, 0]}>
-        <boxGeometry args={[3.36, 0.045, 0.11]} />
-        <meshStandardMaterial color={METAL} metalness={0.45} roughness={0.4} />
-      </mesh>
     </group>
   )
 }
@@ -632,130 +528,84 @@ function Scene() {
   snapshot.workers.forEach((worker) => {
     const index = seen[worker.stageId] ?? 0
     const count = perStage[worker.stageId] ?? 1
-    offsets[worker.id] = (index - (count - 1) / 2) * 0.95
-    labelLifts[worker.id] = index * 0.32
+    offsets[worker.id] = (index - (count - 1) / 2) * 0.82
+    labelLifts[worker.id] = index * 0.26
     seen[worker.stageId] = index + 1
   })
   const lastDispatch = snapshot.dispatch?.[snapshot.dispatch.length - 1]
-  const stages: Stage[] = snapshot.stages.map((stage) => ({
+  const stages: Stage[] = snapshot.stages.map((stage, i) => ({
     ...stage,
-    position: { ...stage.position, x: stage.position.x * STAGE_SPREAD },
+    position: {
+      x: STAGE_LAYOUT[i]?.x ?? stage.position.x * 0.45,
+      y: 0,
+      z: STAGE_LAYOUT[i]?.z ?? 0,
+    },
   }))
 
   return (
     <>
       <SceneProbe />
       <RoomShell />
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.02, 0]} receiveShadow>
-        <planeGeometry args={[80, 80]} />
-        <meshStandardMaterial color="#d3dce6" roughness={0.97} metalness={0} />
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0]} receiveShadow>
+        <planeGeometry args={[90, 90]} />
+        <meshStandardMaterial color="#eef2f7" roughness={0.9} metalness={0.02} />
       </mesh>
-      <Grid
-        position={[0, 0.004, 0]}
-        args={[60, 60]}
-        cellSize={1}
-        cellThickness={0.5}
-        cellColor="#b3c1d1"
-        sectionSize={5}
-        sectionThickness={1}
-        sectionColor="#9aabbe"
-        fadeDistance={38}
-        fadeStrength={1.7}
-        infiniteGrid
-      />
-      {/* Rug: two flat slabs, not RoundedBox. A 14 mm plate cannot carry a
-          0.3 m corner radius - drei extrudes the radius into thickness, which
-          turned the rug into a 1.4 m wall that swallowed the desks and every
-          character's legs. Flat boxes keep it at floor level.
 
-          Sized to the work zone instead of the whole room, with a bound edge
-          and module seams. A rug that runs off all four edges of the frame
-          reads as an empty sheet; one that ends inside the frame reads as a
-          designed floor. */}
-      <mesh position={[0, 0.004, 0.8]} receiveShadow>
-        <boxGeometry args={[13.6, 0.008, 7.9]} />
-        <meshStandardMaterial color="#a8b8cb" roughness={1} metalness={0} />
-      </mesh>
-      <mesh position={[0, 0.012, 0.8]} receiveShadow>
-        <boxGeometry args={[13.3, 0.008, 7.6]} />
-        <meshStandardMaterial color="#dbe6f2" roughness={1} metalness={0} />
-      </mesh>
-      {[-3.72, 3.72].map((pz) => (
-        <mesh key={`rug-edge-z-${pz}`} position={[0, 0.019, 0.8 + pz]} receiveShadow>
-          <boxGeometry args={[13.32, 0.004, 0.09]} />
-          <meshStandardMaterial color="#b2c1d3" roughness={1} />
-        </mesh>
-      ))}
-      {[-6.56, 6.56].map((px) => (
-        <mesh key={`rug-edge-x-${px}`} position={[px, 0.019, 0.8]} receiveShadow>
-          <boxGeometry args={[0.09, 0.004, 7.62]} />
-          <meshStandardMaterial color="#b2c1d3" roughness={1} />
-        </mesh>
-      ))}
-      {[-2.4, 2.4].map((pz) => (
-        <mesh key={`rug-seam-z-${pz}`} position={[0, 0.017, 0.8 + pz]} receiveShadow>
-          <boxGeometry args={[13.3, 0.002, 0.028]} />
-          <meshStandardMaterial color="#bccadb" roughness={1} />
-        </mesh>
-      ))}
-      {[-4.42, 0, 4.42].map((px) => (
-        <mesh key={`rug-seam-x-${px}`} position={[px, 0.017, 0.8]} receiveShadow>
-          <boxGeometry args={[0.028, 0.002, 7.6]} />
-          <meshStandardMaterial color="#bccadb" roughness={1} />
-        </mesh>
-      ))}
-      <OfficePlant x={-8.6} z={1.4} />
-      <OfficePlant x={8.6} z={1.4} scale={0.86} />
-      <FloorLamp x={-8.2} z={-2.6} />
-      <FloorLamp x={8.2} z={-2.6} />
-      <Partition x={-5} />
-      <Partition x={5} />
-      <Cabinet x={-8.55} z={-8.9} />
-      <WallClock x={8.3} y={2.95} z={-9.32} />
-      <OfficeChair x={-7.9} z={0.35} accent="#8a93c9" rotation={0.7} />
-      <OfficeChair x={7.9} z={0.35} accent="#8a93c9" rotation={-0.7} />
-      <OfficePlant x={-6.9} z={-6.4} scale={1.75} />
-      <OfficePlant x={6.9} z={-6.4} scale={1.55} />
+      {/* ---------- back of the studio ---------- */}
+      <Credenza x={-0.5} z={-3.95} width={3.1} />
+      <Bust x={1.75} z={-3.95} rotation={-0.35} />
+      <Easel x={3.75} z={-2.75} rotation={-0.4} />
+      <ShelfUnit x={-3.4} z={-4.95} rotation={0.04} />
+      <ShelfUnit x={3.45} z={-5.05} rotation={-0.05} width={1.5} />
+      <Plant x={-4.4} z={-3.5} scale={1.45} />
+      <Plant x={4.35} z={-4.2} scale={1.2} />
+      <Plant x={-1.9} z={-5.5} scale={1.05} />
+      <WallClock x={-4.9} y={2.85} z={-7.72} />
+      <WallArt x={-2.0} y={2.5} z={-7.74} w={1.15} h={1.35} />
+      <WallArt x={2.6} y={2.35} z={-7.74} w={0.95} h={1.1} />
+      <BoxStack x={-4.0} z={-2.15} rotation={0.3} />
+      <BoxStack x={2.75} z={-3.15} rotation={-0.4} />
+
       <Conveyor />
-      {stages.map((stage) => (
-        <StagePlatform
-          key={stage.id}
-          stage={stage}
-          highlighted={snapshot.boss.targetStageId === stage.id && snapshot.boss.mode !== 'patrol'}
-        />
-      ))}
-      {stages.map((stage) => {
-        const devices = (snapshot.tools ?? []).filter((tool) => tool.stageId === stage.id)
+      {stages.map((stage, index) => {
+        const devices = (snapshot.tools ?? [])
+          .filter((tool) => tool.stageId === stage.id)
+          .map((tool) => ({
+            tool,
+            recent: tool.active || (tool.lastSeq > 0 && snapshot.seq - tool.lastSeq < 12),
+          }))
         return (
-          <group key={'devices-' + stage.id} position={[stage.position.x, stage.position.y, stage.position.z]}>
-            {devices.map((tool, i) => (
-              <ToolDevice
-                key={tool.name}
-                tool={tool}
-                x={(i - (devices.length - 1) / 2) * 0.92}
-                recent={tool.active || (tool.lastSeq > 0 && snapshot.seq - tool.lastSeq < 12)}
-              />
-            ))}
-          </group>
+          <WorkStation
+            key={stage.id}
+            stage={stage}
+            index={index}
+            devices={devices}
+            highlighted={snapshot.boss.targetStageId === stage.id && snapshot.boss.mode !== 'patrol'}
+          />
         )
       })}
-      {snapshot.workers.map((worker) => (
-        <WorkerFigure
-          key={worker.id}
-          worker={worker}
-          stage={stages.find((stage) => stage.id === worker.stageId)}
-          selected={selectedWorkerId === worker.id}
-          offsetX={offsets[worker.id] ?? 0}
-          labelLift={labelLifts[worker.id] ?? 0}
-        />
-      ))}
+      {snapshot.workers.map((worker) => {
+        const index = stages.findIndex((stage) => stage.id === worker.stageId)
+        const stage = stages[index]
+        if (!stage) return null
+        return (
+          <WorkerFigure
+            key={worker.id}
+            worker={worker}
+            anchor={seatAnchor(stage, index, offsets[worker.id] ?? 0)}
+            selected={selectedWorkerId === worker.id}
+            tint={soften(stage.color, 0.6, 0.5)}
+            labelLift={labelLifts[worker.id] ?? 0}
+          />
+        )
+      })}
       {/* Only the newest crates: finished ones stay mounted but hidden, so a
           long shift never grows an unbounded HTML label layer. */}
       {Array.from({ length: CRATE_SLOTS }, (_, index) => (
         <TaskCrate
           key={index}
           task={snapshot.tasks[snapshot.tasks.length - CRATE_SLOTS + index] ?? null}
-          offset={((index % 3) - 1) * 0.36}
+          offset={((index % 3) - 1) * 0.3}
           stages={stages}
         />
       ))}
@@ -783,66 +633,74 @@ export default function Workshop() {
         )) return
         closeAvatarEditor()
       }}
-      camera={{ position: [0, 4.35, 11.6], fov: 36 }}
+      camera={{ position: [0.35, 2.45, 8.15], fov: 41 }}
       onCreated={({ scene, camera }) => {
         ;(window as unknown as Record<string, unknown>).__MEDUSA = { scene, camera }
       }}
       dpr={[1, 2]}
-      gl={{ antialias: false, alpha: true, toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 0.97 }}
+      gl={{
+        antialias: false,
+        alpha: true,
+        toneMapping: THREE.ACESFilmicToneMapping,
+        toneMappingExposure: 1.1,
+      }}
     >
-      {/* No scene background: the CSS ceiling gradient shows through, which
-          gives the horizon a soft falloff for free. */}
-      <fog attach="fog" args={['#e2eaf2', 30, 64]} />
-      {/* Ambient is deliberately low: the scene needs a direction of light or
-          every pale surface flattens into the same white. */}
-      <ambientLight intensity={0.3} />
-      <hemisphereLight args={['#ffffff', '#b9c6d6', 0.46]} />
+      {/* No scene background: the CSS studio gradient shows through. */}
+      <fog attach="fog" args={['#fafbfd', 42, 92]} />
+      {/* High-key studio light: a broad soft key, a cool bounce and a lot of
+          ambient. The room has to read as white without washing out the pale
+          furniture, so the key is wide and the shadows are lifted. */}
+      <ambientLight intensity={0.34} />
+      <hemisphereLight args={['#ffffff', '#dfe6ef', 0.58]} />
       <directionalLight
-        position={[7, 13, 9]}
-        intensity={1.6}
-        color="#fff7ec"
+        position={[6.5, 12, 8.5]}
+        intensity={1.75}
+        color="#fff4e6"
         castShadow
         shadow-mapSize={[2048, 2048]}
-        shadow-camera-left={-17}
-        shadow-camera-right={17}
-        shadow-camera-top={17}
-        shadow-camera-bottom={-17}
+        shadow-camera-left={-16}
+        shadow-camera-right={16}
+        shadow-camera-top={16}
+        shadow-camera-bottom={-16}
         shadow-camera-near={0.5}
         shadow-camera-far={44}
         shadow-bias={-0.0002}
-        shadow-normalBias={0.022}
+        shadow-normalBias={0.02}
       />
-      <directionalLight position={[-9, 7, -7]} intensity={0.34} color="#c3d4ee" />
+      <directionalLight position={[-8, 7, -5]} intensity={0.4} color="#eef5ff" />
 
       {/* Self-hosted studio lighting: Lightformers bake into a cubemap in one
           frame, so there is no HDRI download and no CDN dependency. */}
-      <Environment resolution={256} frames={1} environmentIntensity={0.6}>
-        <Lightformer form="rect" intensity={1.5} color="#ffffff" scale={[12, 6, 1]} position={[0, 8, -6]} />
-        <Lightformer form="rect" intensity={0.9} color="#dce7ff" scale={[8, 5, 1]} position={[-9, 4, 2]} rotation={[0, Math.PI / 2, 0]} />
-        <Lightformer form="rect" intensity={0.75} color="#fff0dc" scale={[8, 5, 1]} position={[9, 4, 2]} rotation={[0, -Math.PI / 2, 0]} />
-        <Lightformer form="circle" intensity={1.1} color="#ffffff" scale={[5, 5, 1]} position={[0, 10, 4]} rotation={[-Math.PI / 2, 0, 0]} />
+      <Environment resolution={256} frames={1} environmentIntensity={1.15}>
+        <Lightformer form="rect" intensity={1.7} color="#ffffff" scale={[14, 7, 1]} position={[0, 8, -6]} />
+        <Lightformer form="rect" intensity={1.1} color="#ffffff" scale={[9, 6, 1]} position={[-9, 4, 2]} rotation={[0, Math.PI / 2, 0]} />
+        <Lightformer form="rect" intensity={1.1} color="#ffffff" scale={[9, 6, 1]} position={[9, 4, 2]} rotation={[0, -Math.PI / 2, 0]} />
+        <Lightformer form="circle" intensity={1.3} color="#ffffff" scale={[6, 6, 1]} position={[0, 10, 4]} rotation={[-Math.PI / 2, 0, 0]} />
       </Environment>
       <ContactShadows
-        position={[0, 0.012, 0]}
-        scale={38}
-        opacity={0.64}
-        blur={1.7}
-        far={8}
+        position={[0, 0.006, 0]}
+        scale={34}
+        opacity={0.5}
+        blur={1.6}
+        far={6}
         resolution={1024}
-        color="#3f4b5c"
+        color="#5c6a7e"
       />
       <Scene />
       <OrbitControls
         enableDamping
         dampingFactor={0.08}
         minDistance={3}
-        maxDistance={42}
-        maxPolarAngle={Math.PI / 2.1}
-        target={[0, 0.9, 0.6]}
+        maxDistance={40}
+        maxPolarAngle={Math.PI / 2.08}
+        target={[0, 0.95, 0.25]}
       />
       <EffectComposer multisampling={4} frameBufferType={THREE.HalfFloatType}>
-        <Bloom intensity={0.3} luminanceThreshold={0.92} luminanceSmoothing={0.24} mipmapBlur radius={0.55} />
-        <Vignette offset={0.32} darkness={0.24} />
+        {/* Ambient occlusion is what makes white-on-white read: without it
+            every pale surface merges into the next one. */}
+        <N8AO aoRadius={0.7} intensity={2.4} distanceFalloff={0.85} color="#57647a" />
+        <Bloom intensity={0.16} luminanceThreshold={0.95} luminanceSmoothing={0.2} mipmapBlur radius={0.5} />
+        <Vignette offset={0.32} darkness={0.08} />
       </EffectComposer>
     </Canvas>
   )

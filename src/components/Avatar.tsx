@@ -75,18 +75,18 @@ const TORSO_PROFILE: [number, number][] = [
   [0.004, 0.279],
 ]
 
-function Human({ color }: { color: string }) {
-  const torso = useMemo(
-    () => TORSO_PROFILE.map(([r, y]) => new THREE.Vector2(r, y)),
-    [],
-  )
+const CLOTH = '#6d7793'
 
+/** How far a seated figure has to be lifted so its soles touch the floor.
+    Kept next to the rig because the scene needs the same number to seat a
+    worker on a chair without measuring the geometry at runtime. */
+export const SEATED_Y = 0.512
+
+/** Standing legs: tapered thigh/calf, a slight outward stance and a two-part
+    shoe. Two identical parallel boxes read as a bust on a plinth. */
+function StandingLegs() {
   return (
     <group>
-      {/* ---------- legs + shoes ----------
-          Two identical parallel boxes read as a bust on a plinth. Tapered
-          thigh/calf widths, a slight outward stance, one foot a half-step
-          forward and a two-part shoe give the figure a real lower body. */}
       {[-0.108, 0.108].map((x, i) => (
         <group
           key={`leg-${i}`}
@@ -109,17 +109,17 @@ function Human({ color }: { color: string }) {
           {/* calf: narrower than the thigh */}
           <mesh position={[0, -0.468, 0]} castShadow>
             <boxGeometry args={[0.084, 0.20, 0.09]} />
-            <Mat color="#6d7793" roughness={0.86} />
+            <Mat color={CLOTH} roughness={0.86} />
           </mesh>
           {/* knee */}
           <mesh position={[0, -0.373, 0.002]} castShadow>
             <sphereGeometry args={[0.047, 18, 14]} />
-            <Mat color="#6d7793" roughness={0.86} />
+            <Mat color={CLOTH} roughness={0.86} />
           </mesh>
           {/* thigh: same cloth as the calf, the taper carries the shape */}
           <mesh position={[0, -0.278, 0]} castShadow>
             <boxGeometry args={[0.126, 0.192, 0.128]} />
-            <Mat color="#6d7793" roughness={0.86} />
+            <Mat color={CLOTH} roughness={0.86} />
           </mesh>
           <mesh position={[0, -0.552, 0]}>
             <boxGeometry args={[0.096, 0.014, 0.104]} />
@@ -132,6 +132,64 @@ function Human({ color }: { color: string }) {
           </mesh>
         </group>
       ))}
+    </group>
+  )
+}
+
+/**
+ * Seated legs, built directly in the seated frame rather than rotating the
+ * standing rig. The pivot is the hip (local y = -0.06), the thigh runs
+ * forward, the shin drops vertically, and the sole lands at -0.512 so the
+ * pelvis sits on a 0.33 m chair with both feet on the floor.
+ */
+function SeatedLegs() {
+  return (
+    <group>
+      {[-0.105, 0.105].map((x, i) => (
+        <group
+          key={`seated-leg-${i}`}
+          position={[x, -0.06, i === 0 ? 0.03 : -0.01]}
+          rotation={[0, 0, x > 0 ? -0.045 : 0.045]}
+        >
+          {/* thigh, running forward from the hip */}
+          <mesh position={[0, -0.038, 0.115]} rotation={[0.05, 0, 0]} castShadow>
+            <boxGeometry args={[0.132, 0.148, 0.27]} />
+            <Mat color={CLOTH} roughness={0.86} />
+          </mesh>
+          {/* knee */}
+          <mesh position={[0, -0.072, 0.248]} castShadow>
+            <sphereGeometry args={[0.052, 16, 12]} />
+            <Mat color={CLOTH} roughness={0.86} />
+          </mesh>
+          {/* shin, back to vertical */}
+          <mesh position={[0, -0.245, 0.243]} castShadow>
+            <boxGeometry args={[0.09, 0.34, 0.098]} />
+            <Mat color={CLOTH} roughness={0.86} />
+          </mesh>
+          {/* shoe + light sole */}
+          <mesh position={[0, -0.404, 0.288]} castShadow>
+            <boxGeometry args={[0.105, 0.062, 0.21]} />
+            <Mat color={SHOE} roughness={0.5} />
+          </mesh>
+          <mesh position={[0, -0.442, 0.288]}>
+            <boxGeometry args={[0.112, 0.02, 0.216]} />
+            <Mat color="#f2f5f8" roughness={0.86} />
+          </mesh>
+        </group>
+      ))}
+    </group>
+  )
+}
+
+function Human({ color, pose = 'stand' }: { color: string; pose?: 'stand' | 'sit' }) {
+  const torso = useMemo(
+    () => TORSO_PROFILE.map(([r, y]) => new THREE.Vector2(r, y)),
+    [],
+  )
+
+  return (
+    <group>
+      {pose === 'sit' ? <SeatedLegs /> : <StandingLegs />}
 
       {/* ---------- pelvis: a slab, not a sphere ----------
           A squashed sphere here swallowed the top of both thighs and made the
@@ -569,9 +627,9 @@ function Capsule({ color }: { color: string }) {
   )
 }
 
-function BuiltinAvatar({ model, color }: { model: string; color: string }) {
+function BuiltinAvatar({ model, color, pose = 'stand' }: { model: string; color: string; pose?: 'stand' | 'sit' }) {
   switch (model) {
-    case 'human': return <Human color={color} />
+    case 'human': return <Human color={color} pose={pose} />
     case 'office': return <Office color={color} />
     case 'blocky': return <Blocky color={color} />
     case 'robot': return <Robot color={color} />
@@ -624,12 +682,13 @@ class ModelBoundary extends Component<
 }
 
 export function Avatar({
-  model, color, boss = false, scale = 1,
+  model, color, boss = false, scale = 1, pose = 'stand',
 }: {
   model: string
   color: string
   boss?: boolean
   scale?: number
+  pose?: 'stand' | 'sit'
 }) {
   const headTop = HEAD_TOP[model] ?? HEAD_TOP.capsule
   const fallback = <BuiltinAvatar model="capsule" color={color} />
@@ -642,7 +701,7 @@ export function Avatar({
           </Suspense>
         </ModelBoundary>
       ) : (
-        <BuiltinAvatar model={model} color={color} />
+        <BuiltinAvatar model={model} color={color} pose={pose} />
       )}
       {/* Status beacon sits above every model, so state survives a swap. */}
       <mesh position={[0, headTop + 0.14, 0]}>
