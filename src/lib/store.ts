@@ -26,7 +26,7 @@ const MAX_FRAMES = 600
  * it never reaches the App Server and never enters the append-only log.
  * One table feeds the topbar, the keyboard shortcuts and the camera tween.
  */
-export type CameraPreset = 'studio' | 'desk' | 'close' | 'wide'
+export type CameraPreset = 'studio' | 'desk' | 'close' | 'wide' | 'board'
 
 export interface CameraShot {
   label: string
@@ -59,6 +59,13 @@ export const CAMERA_PRESETS: Record<CameraPreset, CameraShot> = {
     // Close and low: a flatter angle compresses the floor between the desks
     // and the camera, which was the emptiest part of the wide frame.
     position: [0, 2.2, 7.6], target: [0, 1.0, -1.6], fov: 46,
+  },
+  // The wall board carries the shift's goal and plan. A dedicated shot is the
+  // only way to actually read it — from the room shots it is ~200 px wide and
+  // the floating REC nameplates sit right on top of it.
+  board: {
+    label: '白板', hint: '正对任务白板，读目标与规划 · 快捷键 5',
+    position: [0, 2.8, -2.0], target: [0, 2.42, -7.62], fov: 40,
   },
 }
 
@@ -350,7 +357,7 @@ export const useMedusaStore = create<MedusaState>((set, get) => ({
   hydrateCamera: () => {
     try {
       const raw = localStorage.getItem(CAMERA_STORAGE_KEY)
-      if (raw === 'studio' || raw === 'desk' || raw === 'close' || raw === 'wide') {
+      if (raw === 'studio' || raw === 'desk' || raw === 'close' || raw === 'wide' || raw === 'board') {
         set({ cameraPreset: raw })
       }
     } catch {

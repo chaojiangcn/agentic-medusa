@@ -67,7 +67,7 @@ export function UI() {
   // typing an order title never yanks the camera out from under the user.
   useEffect(() => {
     const keys: Record<string, CameraPreset> = {
-      '1': 'studio', '2': 'desk', '3': 'close', '4': 'wide',
+      '1': 'studio', '2': 'desk', '3': 'close', '4': 'wide', '5': 'board',
     }
     const onKey = (event: KeyboardEvent) => {
       const el = event.target as HTMLElement | null

@@ -576,30 +576,294 @@ function ToolDevice({ tool, x, recent }: { tool: ToolView; x: number; recent: bo
   )
 }
 
-/** Wall-mounted dispatch board. A dark slab would be the only black object in
-    an otherwise white room, so the screen is pale and the frame is white. */
-function DispatchBoard({ record }: { record?: DispatchRecord }) {
+/** ---------- Wall whiteboard ----------
+    A real CanvasTexture, not a floating DOM label: the goal, the plan and the
+    acceptance ledger are painted onto the board surface, so the lettering
+    stays glued to the wall from every camera preset. Everything on it is a
+    projection of the append-only log — the goal is declared at turn.started
+    and the plan is the station path, neither is invented in the renderer. */
+
+const BOARD_W = 1200
+const BOARD_H = 700
+const BOARD_SANS = '"Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif'
+const BOARD_MONO = 'ui-monospace, Consolas, monospace'
+
+function boardRR(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+  ctx.beginPath()
+  ctx.moveTo(x + r, y)
+  ctx.arcTo(x + w, y, x + w, y + h, r)
+  ctx.arcTo(x + w, y + h, x, y + h, r)
+  ctx.arcTo(x, y + h, x, y, r)
+  ctx.arcTo(x, y, x + w, y, r)
+  ctx.closePath()
+}
+
+function boardLabel(ctx: CanvasRenderingContext2D, x: number, y: number, text: string) {
+  ctx.fillStyle = '#2f6fb8'
+  ctx.fillRect(x, y - 17, 4, 20)
+  ctx.font = `700 21px ${BOARD_SANS}`
+  ctx.fillStyle = '#2f4a6d'
+  ctx.fillText(text, x + 14, y)
+}
+
+function boardWrap(
+  ctx: CanvasRenderingContext2D, text: string, x: number, y: number,
+  maxWidth: number, lineHeight: number, maxLines: number, size: number, color: string,
+) {
+  ctx.font = `500 ${size}px ${BOARD_SANS}`
+  ctx.fillStyle = color
+  const lines: string[] = []
+  let line = ''
+  for (const ch of Array.from(text)) {
+    if (ctx.measureText(line + ch).width > maxWidth && line) {
+      lines.push(line)
+      line = ch
+    } else line += ch
+  }
+  if (line) lines.push(line)
+  const clipped = lines.slice(0, maxLines)
+  if (lines.length > maxLines) {
+    let last = clipped[maxLines - 1] ?? ''
+    while (last && ctx.measureText(last + '…').width > maxWidth) last = last.slice(0, -1)
+    clipped[maxLines - 1] = last + '…'
+  }
+  clipped.forEach((l, i) => ctx.fillText(l, x, y + i * lineHeight))
+}
+
+const BOARD_STATUS: Record<string, { text: string; fg: string; bg: string }> = {
+  running: { text: '进行中', fg: '#2f6fb8', bg: '#e3edfc' },
+  queued: { text: '排队中', fg: '#8a97a8', bg: '#eef2f7' },
+  done: { text: '已完成', fg: '#1d9e75', bg: '#e3f4ec' },
+  failed: { text: '未通过', fg: '#c0625d', bg: '#fbe9e7' },
+}
+
+function paintMissionBoard(ctx: CanvasRenderingContext2D, d: {
+  task?: WorkTask
+  stages: Stage[]
+  record?: DispatchRecord
+  runId: string
+}) {
+  const W = BOARD_W
+  const H = BOARD_H
+  const { task, stages, record, runId } = d
+  ctx.fillStyle = '#fcfdff'
+  ctx.fillRect(0, 0, W, H)
+
+  // Faint planning grid — reads as a whiteboard, not a screen.
+  ctx.strokeStyle = 'rgba(190, 208, 228, 0.26)'
+  ctx.lineWidth = 1
+  for (let x = 40; x < W; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke() }
+  for (let y = 40; y < H; y += 40) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke() }
+  ctx.fillStyle = 'rgba(226, 206, 160, 0.5)'
+  ctx.fillRect(76, 0, 96, 24)
+  ctx.fillRect(W - 172, 0, 96, 24)
+
+  // Header
+  ctx.fillStyle = '#2f6fb8'
+  ctx.fillRect(30, 34, 8, 42)
+  ctx.font = `700 40px ${BOARD_SANS}`
+  ctx.fillStyle = '#21354f'
+  ctx.fillText('任务白板', 54, 68)
+  ctx.font = `500 19px ${BOARD_SANS}`
+  ctx.fillStyle = '#8797aa'
+  ctx.fillText('MISSION BOARD · 本班次目标与规划', 252, 66)
+  ctx.font = `500 18px ${BOARD_MONO}`
+  ctx.textAlign = 'right'
+  ctx.fillStyle = '#9aa7b6'
+  ctx.fillText(runId.slice(0, 18).toUpperCase(), W - 34, 66)
+  ctx.textAlign = 'left'
+  ctx.strokeStyle = '#d9e3ef'
+  ctx.lineWidth = 2
+  ctx.beginPath(); ctx.moveTo(30, 96); ctx.lineTo(W - 30, 96); ctx.stroke()
+
+  // Work order strip
+  boardRR(ctx, 30, 110, W - 60, 82, 12)
+  ctx.fillStyle = '#f1f6fc'; ctx.fill()
+  ctx.strokeStyle = '#dfe9f5'; ctx.lineWidth = 2; ctx.stroke()
+  if (task) {
+    const st = BOARD_STATUS[task.status] ?? BOARD_STATUS.queued
+    ctx.font = `600 24px ${BOARD_MONO}`
+    ctx.fillStyle = '#5b6b80'
+    ctx.fillText(task.id.slice(0, 16), 48, 145)
+    ctx.font = `700 27px ${BOARD_SANS}`
+    ctx.fillStyle = '#22304a'
+    ctx.fillText(task.title.slice(0, 22), 216, 145)
+    boardRR(ctx, W - 218, 122, 186, 34, 17)
+    ctx.fillStyle = st.bg; ctx.fill()
+    ctx.font = `600 19px ${BOARD_SANS}`
+    ctx.fillStyle = st.fg
+    ctx.textAlign = 'center'
+    ctx.fillText(`${st.text}  ${Math.round(task.progress * 100)}%`, W - 125, 146)
+    ctx.textAlign = 'left'
+    ctx.fillStyle = '#dce6f2'
+    boardRR(ctx, 48, 162, W - 96, 10, 5); ctx.fill()
+    ctx.fillStyle = st.fg
+    boardRR(ctx, 48, 162, Math.max(6, (W - 96) * Math.min(1, Math.max(0, task.progress))), 10, 5); ctx.fill()
+  } else {
+    ctx.font = `600 25px ${BOARD_SANS}`
+    ctx.fillStyle = '#8a97a8'
+    ctx.fillText('暂无工单 · 在左侧投单台下达任务', 48, 155)
+  }
+
+  // Goal
+  boardLabel(ctx, 30, 226, '目标 GOAL')
+  if (task?.goal) {
+    boardWrap(ctx, task.goal, 32, 266, W - 80, 42, 2, 30, '#1f2b3a')
+  } else {
+    ctx.font = `500 28px ${BOARD_SANS}`
+    ctx.fillStyle = '#9aa7b6'
+    ctx.fillText('未声明目标 · 留空则使用模板目标', 32, 266)
+  }
+
+  // Plan: the station path, with the live order's current station marked
+  boardLabel(ctx, 30, 336, '规划 PLAN')
+  const cardW = 352
+  const gap = 22
+  const cardY = 354
+  const cardH = 90
+  stages.slice(0, 3).forEach((stage, i) => {
+    const x = 30 + i * (cardW + gap)
+    const done = !!task && (task.status === 'done' || i < task.stageIndex)
+    const current = !!task && task.status !== 'done' && i === task.stageIndex
+    boardRR(ctx, x, cardY, cardW, cardH, 10)
+    ctx.fillStyle = current ? '#e8f0ff' : done ? '#edf7f1' : '#f7f9fc'
+    ctx.fill()
+    ctx.strokeStyle = current ? '#7ba2dc' : done ? '#bcd9c8' : '#dfe6ee'
+    ctx.lineWidth = current ? 3 : 2
+    ctx.stroke()
+    ctx.font = `600 17px ${BOARD_MONO}`
+    ctx.fillStyle = current ? '#2f6fb8' : done ? '#1d9e75' : '#9aa7b6'
+    ctx.fillText(`0${i + 1}`, x + 16, cardY + 27)
+    ctx.font = `700 26px ${BOARD_SANS}`
+    ctx.fillStyle = current ? '#213a63' : '#33465e'
+    ctx.fillText(stage.name.slice(0, 12), x + 16, cardY + 58)
+    ctx.font = `500 16px ${BOARD_SANS}`
+    ctx.fillStyle = current ? '#2f6fb8' : done ? '#1d9e75' : '#9aa7b6'
+    ctx.fillText(current ? '● 进行中' : done ? '✓ 已完成' : '○ 待办', x + 16, cardY + 80)
+    if (i < 2) {
+      ctx.font = `500 26px ${BOARD_SANS}`
+      ctx.fillStyle = '#9fb2c9'
+      ctx.fillText('→', x + cardW + 3, cardY + 55)
+    }
+  })
+  ctx.font = `500 19px ${BOARD_SANS}`
+  ctx.fillStyle = '#6b7b8f'
+  ctx.fillText(record?.reason ? `派单依据：${record.reason}`.slice(0, 54) : '规划路径：投单 → 派单 → 执行 → 判定', 32, 470)
+
+  // Acceptance ledger
+  boardLabel(ctx, 30, 506, '验收 ACCEPTANCE')
+  const criteria = task?.criteria ?? []
+  if (criteria.length) {
+    criteria.slice(0, 3).forEach((c, i) => {
+      const y = 540 + i * 30
+      ctx.font = `700 20px ${BOARD_SANS}`
+      ctx.fillStyle = c.ok ? '#1d9e75' : '#b7c2d0'
+      ctx.fillText(c.ok ? '✓' : '○', 34, y)
+      ctx.font = `500 21px ${BOARD_SANS}`
+      ctx.fillStyle = c.ok ? '#33465e' : '#8797aa'
+      ctx.fillText(c.label.slice(0, 24), 62, y)
+    })
+    const ok = criteria.filter((c) => c.ok).length
+    ctx.font = `700 22px ${BOARD_SANS}`
+    ctx.fillStyle = ok === criteria.length ? '#1d9e75' : '#2f6fb8'
+    ctx.textAlign = 'right'
+    ctx.fillText(`${ok} / ${criteria.length} 通过`, W - 34, 540)
+    ctx.textAlign = 'left'
+  } else {
+    ctx.font = `500 21px ${BOARD_SANS}`
+    ctx.fillStyle = '#9aa7a8'
+    ctx.fillText('等待验收判据写入日志', 34, 540)
+  }
+
+  // Footer: keep the dispatcher's decision as a footnote
+  ctx.strokeStyle = '#d9e3ef'
+  ctx.lineWidth = 2
+  ctx.beginPath(); ctx.moveTo(30, 632); ctx.lineTo(W - 30, 632); ctx.stroke()
+  ctx.font = `700 18px ${BOARD_SANS}`
+  ctx.fillStyle = '#8797aa'
+  ctx.fillText('最近派单', 32, 668)
+  ctx.font = `500 19px ${BOARD_MONO}`
+  ctx.fillStyle = '#4b637a'
+  ctx.fillText(
+    record ? `${record.stageId} · ${record.workerName} · 得分 ${record.score.toFixed(2)}` : '等待新工单',
+    150, 668,
+  )
+}
+
+/** Wall-mounted mission board: goal + plan + acceptance, painted on a
+    CanvasTexture so it stays flat on the wall instead of billboarding. */
+function MissionBoard({ tasks, stages, record, runId }: {
+  tasks: WorkTask[]
+  stages: Stage[]
+  record?: DispatchRecord
+  runId: string
+}) {
   const requestTab = useMedusaStore((state) => state.requestTab)
+  const setCameraPreset = useMedusaStore((state) => state.setCameraPreset)
+  const [hovered, setHovered] = useState(false)
+  const active = useMemo(() => {
+    const live = tasks.filter((t) => t.status !== 'done' && t.status !== 'failed')
+    return live[live.length - 1] ?? tasks[tasks.length - 1]
+  }, [tasks])
+  // Repaint only when something readable changes, not on every logged tick.
+  const signature = [
+    active?.id, active?.title, active?.goal, active?.status, active?.stageIndex,
+    Math.round((active?.progress ?? 0) * 100),
+    (active?.criteria ?? []).map((c) => (c.ok ? '1' : '0')).join(''),
+    stages.map((s) => s.name).join('|'),
+    record?.seq, record?.taskId, record?.stageId, record?.workerName, record?.score,
+    runId,
+  ].join('~')
+  const texture = useMemo(() => {
+    if (typeof document === 'undefined') return null
+    const canvas = document.createElement('canvas')
+    canvas.width = BOARD_W
+    canvas.height = BOARD_H
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return null
+    paintMissionBoard(ctx, { task: active, stages, record, runId })
+    const tex = new THREE.CanvasTexture(canvas)
+    tex.colorSpace = THREE.SRGBColorSpace
+    tex.anisotropy = 8
+    return tex
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signature])
+  useEffect(() => () => { texture?.dispose() }, [texture])
   return (
     <group position={[0, 0, -7.62]}>
-      <RoundedBox args={[3.3, 1.5, 0.1]} radius={0.035} smoothness={3} position={[0, 2.42, 0]} castShadow>
-        <meshStandardMaterial color="#fbfcfe" roughness={0.4} metalness={0.12} />
+      <RoundedBox args={[3.72, 2.22, 0.1]} radius={0.035} smoothness={3} position={[0, 2.42, 0]} castShadow>
+        <meshStandardMaterial color="#dfe6ee" roughness={0.42} metalness={0.35} />
       </RoundedBox>
-      <mesh position={[0, 2.42, 0.056]}>
-        <planeGeometry args={[3.1, 1.3]} />
-        <meshStandardMaterial color="#eef5fd" emissive="#dceafb" emissiveIntensity={0.45} roughness={0.24} />
+      <mesh
+        position={[0, 2.42, 0.056]}
+        onClick={(event) => { event.stopPropagation(); setCameraPreset('board'); requestTab('dispatch') }}
+        onPointerOver={(event) => {
+          event.stopPropagation()
+          setHovered(true)
+          document.body.style.cursor = 'pointer'
+        }}
+        onPointerOut={() => { setHovered(false); document.body.style.cursor = 'auto' }}
+      >
+        <planeGeometry args={[3.6, 2.1]} />
+        <meshBasicMaterial map={texture ?? undefined} toneMapped={false} />
       </mesh>
-      <mesh position={[0, 2.42, 0.062]}>
-        <boxGeometry args={[3.12, 0.012, 0.004]} />
-        <meshBasicMaterial color="#7f9fc0" transparent opacity={0.5} />
+      {hovered && (
+        <mesh position={[0, 2.42, 0.061]} raycast={() => {}}>
+          <planeGeometry args={[3.6, 2.1]} />
+          <meshBasicMaterial color="#2f6fb8" transparent opacity={0.05} depthWrite={false} />
+        </mesh>
+      )}
+      {/* Marker tray and two pens: the board is a physical object. */}
+      <mesh position={[0, 1.34, 0.09]} castShadow>
+        <boxGeometry args={[3.5, 0.035, 0.1]} />
+        <meshStandardMaterial color="#e6ecf3" roughness={0.5} metalness={0.25} />
       </mesh>
-      <Html center zIndexRange={[5, 0]} position={[0, 2.42, 0.09]}>
-        <div className="dispatch-board" onClick={() => requestTab('dispatch')}>
-          <span>派单台 / DISPATCH</span>
-          <b>{record ? `${record.taskId} → ${record.stageId}` : '待命中'}</b>
-          <small>{record ? `${record.workerName} · ${record.score.toFixed(2)}` : '等待新工单'}</small>
-        </div>
-      </Html>
+      {[-0.34, 0.1].map((px, i) => (
+        <mesh key={px} position={[px, 1.375, 0.11]} rotation={[0, 0, Math.PI / 2]} castShadow>
+          <cylinderGeometry args={[0.016, 0.016, 0.26, 10]} />
+          <meshStandardMaterial color={i ? '#c0625d' : '#2f6fb8'} roughness={0.5} />
+        </mesh>
+      ))}
     </group>
   )
 }
@@ -616,6 +880,9 @@ function CameraRig({ camera }: { camera: CameraView }) {
   const alert = camera.status === 'alert'
   const color = alert ? '#c0625d' : '#dfe5ec'
   const tilt: [number, number, number] = x < -1 ? [0.2, 0, 0.32] : x > 1 ? [0.2, 0, -0.32] : [0.32, 0, 0]
+  // The centre camera sits directly in front of the wall board. Its nameplate
+  // used to project onto the board's middle, so drop this one onto the stand.
+  const labelY = Math.abs(x) < 1 ? 1.62 : 2.42
   return (
     <group
       position={[x, 0, z]}
@@ -680,7 +947,7 @@ function CameraRig({ camera }: { camera: CameraView }) {
           depthWrite={false}
         />
       </mesh>
-      <Html center zIndexRange={[5, 0]} position={[0, 2.42, 0]}>
+      <Html center zIndexRange={[5, 0]} position={[0, labelY, 0]}>
         <div
           className={'camera-tag' + (alert ? ' alert' : '') + (hovered ? ' hover' : '')}
           onClick={() => { focusOnCamera(camera.id); requestTab('observe') }}
@@ -698,10 +965,12 @@ function CameraRig({ camera }: { camera: CameraView }) {
 function SceneProbe() {
   const scene = useThree((state) => state.scene)
   const camera = useThree((state) => state.camera)
+  const controls = useThree((state) => state.controls)
   useEffect(() => {
     ;(window as unknown as { __medusaScene?: THREE.Scene }).__medusaScene = scene
     ;(window as unknown as { __medusaCamera?: THREE.Camera }).__medusaCamera = camera
-  }, [scene, camera])
+    ;(window as unknown as { __medusaControls?: unknown }).__medusaControls = controls
+  }, [scene, camera, controls])
   return null
 }
 
@@ -847,8 +1116,8 @@ function Scene() {
       <Plant x={4.35} z={-4.2} scale={0.95} />
       <Plant x={-1.9} z={-5.5} scale={0.9} />
       <WallClock x={-4.9} y={2.85} z={-7.72} />
-      <WallArt x={-2.0} y={2.5} z={-7.74} w={1.15} h={1.35} />
-      <WallArt x={2.6} y={2.35} z={-7.74} w={0.95} h={1.1} />
+      <WallArt x={-3.05} y={2.5} z={-7.74} w={1.15} h={1.35} />
+      <WallArt x={3.15} y={2.35} z={-7.74} w={0.95} h={1.1} />
       <BoxStack x={-4.0} z={-2.15} rotation={0.3} />
       <BoxStack x={2.75} z={-3.15} rotation={-0.4} />
 
@@ -907,7 +1176,7 @@ function Scene() {
           />
         )
       })}
-      <DispatchBoard record={lastDispatch} />
+      <MissionBoard tasks={snapshot.tasks} stages={stages} record={lastDispatch} runId={snapshot.runId} />
       {(snapshot.cameras ?? []).map((camera) => (
         <CameraRig key={camera.id} camera={camera} />
       ))}
