@@ -841,9 +841,11 @@ function Scene() {
       <Easel x={3.75} z={-2.75} rotation={-0.4} />
       <ShelfUnit x={-3.4} z={-4.95} rotation={0.04} />
       <ShelfUnit x={3.45} z={-5.05} rotation={-0.05} width={1.5} />
-      <Plant x={-4.4} z={-3.5} scale={1.45} />
-      <Plant x={4.35} z={-4.2} scale={1.2} />
-      <Plant x={-1.9} z={-5.5} scale={1.05} />
+      {/* Keep the floor plants low and away from the shelf/camera sightlines:
+          a tall crown showed up as detached leaves in the close shot. */}
+      <Plant x={-4.4} z={-3.5} scale={1.0} />
+      <Plant x={4.35} z={-4.2} scale={0.95} />
+      <Plant x={-1.9} z={-5.5} scale={0.9} />
       <WallClock x={-4.9} y={2.85} z={-7.72} />
       <WallArt x={-2.0} y={2.5} z={-7.74} w={1.15} h={1.35} />
       <WallArt x={2.6} y={2.35} z={-7.74} w={0.95} h={1.1} />

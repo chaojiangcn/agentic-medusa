@@ -384,16 +384,19 @@ export function TaskChair({
 }
 
 /** Floor plant. Blades are flattened capsules fanned around a stem, which
-    reads as foliage from any angle without a texture. */
+    reads as foliage from any angle without a texture.
+    Keep the crown compact: tall, wide blades used to poke above the shelf
+    line and, from the low/desk cameras, only their tips were in frame with
+    the pot out of shot - it read as foliage growing through the furniture. */
 export function Plant({
   x, z, scale = 1, pot = '#ffffff',
 }: { x: number; z: number; scale?: number; pot?: string }) {
   const blades = useMemo(
     () => Array.from({ length: 13 }, (_, i) => {
       const a = (i / 13) * Math.PI * 2 + Math.sin(i * 2.3) * 0.5
-      const tilt = 0.42 + ((i * 7) % 5) * 0.11
-      const len = 0.36 + ((i * 5) % 4) * 0.06
-      const lift = 0.42 + ((i * 3) % 4) * 0.13
+      const tilt = 0.46 + ((i * 7) % 5) * 0.09
+      const len = 0.28 + ((i * 5) % 4) * 0.045
+      const lift = 0.3 + ((i * 3) % 4) * 0.09
       return { a, tilt, len, lift, tone: i % 3 }
     }),
     [],
